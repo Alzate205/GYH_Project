@@ -5,7 +5,7 @@ from flask_cors import CORS
 import pandas as pd
 import jwt
 from functools import wraps
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from werkzeug.security import check_password_hash, generate_password_hash
 import re
@@ -18,13 +18,12 @@ app.config['SECRET_KEY'] = 'gyhdenimtex'
 # Función para obtener la ruta correcta (empaquetada o no)
 def resource_path(relative_path):
     if hasattr(sys, '_MEIPASS'):
-        # Si está empaquetado con PyInstaller, usa la carpeta temporal _MEIPASS
         return os.path.join(sys._MEIPASS, relative_path)
     return os.path.join(os.path.abspath("."), relative_path)
 
 # Configuración de CORS
 CORS(app, resources={r"/api/*": {
-    "origins": "*",  # Permite todas las origines (ajústalo según tus necesidades)
+    "origins": "*",
     "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     "allow_headers": ["Content-Type", "Authorization"],
     "supports_credentials": True
@@ -37,7 +36,7 @@ DATABASE_URL = "sqlitecloud://cdznfeychz.g6.sqlite.cloud:8860/GYH?apikey=3E1P0wr
 def get_db_connection():
     if 'db' not in g:
         g.db = sqlitecloud.connect(DATABASE_URL)
-        g.db.row_factory = sqlitecloud.Row  # Para devolver filas como diccionarios
+        g.db.row_factory = sqlitecloud.Row
     return g.db
 
 @app.teardown_appcontext
@@ -49,7 +48,13 @@ def close_db_connection(exception):
 # Ruta para servir el archivo index.html
 @app.route('/')
 def serve_index():
-    return send_from_directory(resource_path('.'), 'index.html')
+    directory = resource_path('.')
+    file_path = os.path.join(directory, 'index.html')
+    print(f"Intentando servir index.html desde: {file_path}")  # Depuración
+    if not os.path.exists(file_path):
+        print(f"Archivo no encontrado: {file_path}")
+        return jsonify({'error': 'index.html no encontrado'}), 404
+    return send_from_directory(directory, 'index.html')
 
 # Ruta para servir otros archivos estáticos (HTML, CSS, JS, imágenes, etc.)
 @app.route('/<path:path>')
@@ -60,34 +65,29 @@ def serve_static(path):
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
+        if request.method == 'OPTIONS':
+            return '', 200  # Permitir solicitudes OPTIONS sin autenticación
+
         token = None
         if 'Authorization' in request.headers:
             try:
                 token = request.headers['Authorization'].split(" ")[1]
-                print(f"Token recibido: {token}")
             except IndexError:
-                print("Formato de Authorization inválido")
                 return jsonify({'error': 'Formato de Authorization inválido, se esperaba "Bearer <token>"'}), 401
         
         if not token:
-            print("Token faltante")
             return jsonify({'error': 'Token faltante'}), 401
         
         try:
             data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=["HS256"])
             current_user = data.get('user')
             if not current_user:
-                print("Estructura de token inválida: falta el campo 'user'")
                 return jsonify({'error': 'Estructura de token inválida: falta el campo "user"'}), 401
-            print(f"Usuario autenticado: {current_user}")
         except jwt.ExpiredSignatureError:
-            print("Token expirado")
             return jsonify({'error': 'Token expirado'}), 401
         except jwt.InvalidTokenError:
-            print("Token inválido")
             return jsonify({'error': 'Token inválido'}), 401
         except Exception as e:
-            print(f"Error al validar el token: {str(e)}")
             return jsonify({'error': f'Error al validar el token: {str(e)}'}), 401
         
         return f(current_user, *args, **kwargs)
@@ -96,339 +96,478 @@ def token_required(f):
 # Ruta de autenticación
 @app.route('/api/login', methods=['POST', 'OPTIONS'])
 def login():
+    # Manejo de solicitudes OPTIONS para CORS
     if request.method == 'OPTIONS':
-        return '', 200
+        response = app.make_response('')
+        response.headers['Access-Control-Allow-Origin'] = '*'  # Permitir todos los orígenes (ajusta según necesidad)
+        response.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+        return response, 200
 
-    data = request.get_json()
-    nombre = data.get('nombre')
-    contrasena = data.get('contrasena')
+    # Imprimir las cabeceras recibidas para depuración
+    print("Cabeceras recibidas:", request.headers)
+    print("Content-Type recibido:", request.headers.get('Content-Type'))
+    print("Cuerpo de la solicitud (raw):", request.get_data(as_text=True))
 
-    if not nombre or not contrasena:
-        return jsonify({'error': 'Por favor, ingresa tu nombre de usuario y contraseña.'}), 400
+    try:
+        # Usar force=True para intentar parsear el cuerpo incluso si el Content-Type no es application/json
+        data = request.get_json(force=True)
+        if data is None:
+            return jsonify({'error': 'Solicitud inválida: se esperaba un cuerpo JSON'}), 400
+    except Exception as e:
+        return jsonify({'error': f'Error al procesar la solicitud: {str(e)}'}), 400
 
+    # Cambiar 'nombre' y 'contrasena' por 'username' y 'password' para coincidir con el frontend
+    login_input = data.get('username')
+    password = data.get('password')
+    print(f"Intento de login - Input: {login_input}")
+
+    if not login_input or not password:
+        return jsonify({'error': 'Por favor, ingresa tu usuario (nombre o email) y contraseña.'}), 400
+
+    conn = None
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        print(f"Consultando usuario: {nombre} con contraseña: {contrasena}")
-        cursor.execute('SELECT * FROM usuarios WHERE nombre = ? AND contrasena = ?', (nombre, contrasena))
+
+        if '@' in login_input:
+            cursor.execute('SELECT * FROM usuarios WHERE email = ?', (login_input,))
+        else:
+            cursor.execute('SELECT * FROM usuarios WHERE nombre = ?', (login_input,))
+
         user = cursor.fetchone()
         if user:
-            user_dict = {
-                'id': user['id_usuario'],
-                'nombre': user['nombre'],
-                'rol': user['rol']
-            }
-            token = jwt.encode({
-                'user': user_dict,
-                'exp': datetime.utcnow() + timedelta(days=365)  # Token dura 1 año
-            }, app.config['SECRET_KEY'])
-            print(f"Token generado para {nombre}: {token}")
-            return jsonify({'user': user_dict, 'token': token})
+            print(f"Usuario encontrado: {user['nombre']}")
+            if check_password_hash(user['contrasena'], password):
+                print("Contraseña correcta")
+                user_dict = {
+                    'id': user['id_usuario'],
+                    'nombre': user['nombre'],
+                    'rol': user['rol']
+                }
+                # Reducir la duración del token a 1 hora
+                token = jwt.encode({
+                    'user': user_dict,
+                    'exp': datetime.now(timezone.utc) + timedelta(hours=1)  # Usar datetime.now(timezone.utc)
+                }, app.config['SECRET_KEY'])
+                # Configurar encabezados CORS en la respuesta
+                response = jsonify({'user': user_dict, 'token': token})
+                response.headers['Access-Control-Allow-Origin'] = '*'  # Ajusta según necesidad
+                return response
+            else:
+                print("Contraseña incorrecta")
+                return jsonify({'error': 'El nombre de usuario o la contraseña son incorrectos.'}), 401
         else:
-            print(f"Credenciales inválidas para usuario: {nombre}")
-            return jsonify({'error': 'El nombre de usuario o la contraseña son incorrectos. Por favor, verifica tus datos.'}), 401
+            print("Usuario no encontrado")
+            return jsonify({'error': 'El nombre de usuario o la contraseña son incorrectos.'}), 401
     except Exception as e:
-        print(f"Error en la base de datos: {e}")
-        return jsonify({'error': 'Hubo un problema al intentar iniciar sesión. Intenta de nuevo más tarde.'}), 500
+        return jsonify({'error': f'Hubo un problema al intentar iniciar sesión: {str(e)}'}), 500
     finally:
-        if 'conn' in locals():
+        if conn is not None:
             conn.close()
 
-@app.route('/api/inventario', methods=['GET'])
+@app.route('/api/usuario', methods=['GET', 'OPTIONS'])
 @token_required
-def get_inventario(current_user):
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT id_producto, producto, cantidad, unit_id, unidad, type_id, tipo AS type, 
-                   precio, stock_minimo, stock_maximo, id_proveedor, proveedor,
-                   estado_verificacion, lote, es_toxico, es_corrosivo, es_inflamable
-            FROM vista_inventario
-            ORDER BY id_producto
-        """)
-        productos = cursor.fetchall()
-        return jsonify([{
-            'id': row['id_producto'],
-            'product': row['producto'],
-            'quantity': row['cantidad'],
-            'unit_id': row['unit_id'],
-            'unit': row['unidad'],
-            'type_id': row['type_id'],
-            'type': row['type'],
-            'precio': row['precio'],
-            'stock_minimo': row['stock_minimo'],
-            'stock_maximo': row['stock_maximo'],
-            'id_proveedor': row['id_proveedor'],
-            'proveedor': row['proveedor'],
-            'estado_verificacion': row['estado_verificacion'],
-            'lote': row['lote'],
-            'es_toxico': bool(row['es_toxico']),
-            'es_corrosivo': bool(row['es_corrosivo']),
-            'es_inflamable': bool(row['es_inflamable'])
-        } for row in productos])
-    except Exception as e:
-        print(f"Error al cargar inventario: {e}")
-        return jsonify({'error': 'No se pudo cargar el inventario. Intenta de nuevo más tarde.'}), 500
-    finally:
-        if 'conn' in locals():
-            conn.close()
-
-@app.route('/api/inventario', methods=['POST'])
-@token_required
-def add_producto(current_user):
-    data = request.get_json()
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO productos (nombre, id_tipo, cantidad, id_unidad, precio, stock_minimo, stock_maximo, id_proveedor, estado_verificacion, lote, es_toxico, es_corrosivo, es_inflamable)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            data.get('nombre'),
-            data.get('id_tipo', 1),  # Valor por defecto si no se envía
-            data.get('cantidad'),
-            data.get('id_unidad'),
-            data.get('precio'),
-            data.get('stock_minimo'),
-            data.get('stock_maximo'),
-            data.get('id_proveedor'),
-            data.get('estado_verificacion', 'Pendiente'),
-            data.get('lote', ''),
-            data.get('es_toxico', 0),
-            data.get('es_corrosivo', 0),
-            data.get('es_inflamable', 0)
-        ))
-        product_id = cursor.lastrowid
-        conn.commit()
-        return jsonify({'message': 'Producto agregado correctamente', 'id': product_id}), 201
-    except Exception as e:
-        if 'conn' in locals():
-            conn.rollback()
-        print(f"Error al agregar producto: {e}")
-        return jsonify({'error': str(e)}), 500
-    finally:
-        if 'conn' in locals():
-            conn.close()
-
-@app.route('/api/inventario/<int:id>', methods=['PUT'])
-@token_required
-def update_producto(current_user, id):
-    try:
-        print(f"Usuario autenticado: {current_user}")
-        data = request.get_json()
-        print(f"Datos recibidos del frontend: {data}")
-
-        field_mapping = {
-            'nombre': 'nombre',
-            'quantity': 'cantidad',
-            'precio': 'precio',
-            'id_proveedor': 'id_proveedor',
-            'id_tipo': 'id_tipo',
-            'id_unidad': 'id_unidad',
-            'stock_minimo': 'stock_minimo',
-            'stock_maximo': 'stock_maximo',
-            'lote': 'lote',
-            'estado_verificacion': 'estado_verificacion',
-            'es_toxico': 'es_toxico',
-            'es_corrosivo': 'es_corrosivo',
-            'es_inflamable': 'es_inflamable'
-        }
-
-        mapped_data = {field_mapping.get(key, key): value for key, value in data.items()}
-        print(f"Datos mapeados: {mapped_data}")
-
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
-        cursor.execute('SELECT * FROM productos WHERE id_producto = ?', (id,))
-        producto_actual = cursor.fetchone()
-        if not producto_actual:
-            conn.close()
-            return jsonify({'error': 'Producto no encontrado'}), 404
-
-        columns = [desc[0] for desc in cursor.description]
-        producto_actual_dict = dict(zip(columns, producto_actual))
-        print(f"Producto actual: {producto_actual_dict}")
-
-        update_fields = []
-        update_values = []
-        cantidad_anterior = producto_actual_dict['cantidad'] or 0
-        for key, value in mapped_data.items():
-            if key in producto_actual_dict and value is not None:
-                current_value = producto_actual_dict[key]
-                if current_value is None:
-                    current_value = ''
-                if key in ['es_toxico', 'es_corrosivo', 'es_inflamable']:
-                    value = 1 if value else 0
-                    current_value = 1 if current_value else 0
-                if str(current_value) != str(value):
-                    update_fields.append(f"{key} = ?")
-                    update_values.append(value)
-
-        if not update_fields:
-            conn.close()
-            print("No se detectaron cambios para actualizar.")
-            return jsonify({'message': 'No se realizaron cambios'}), 200
-
-        update_fields.append("fecha_actualizacion = ?")
-        update_values.append(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-        update_values.append(id)
-
-        query = f"UPDATE productos SET {', '.join(update_fields)} WHERE id_producto = ?"
-        print(f"Consulta UPDATE: {query}")
-        print(f"Valores para UPDATE: {update_values}")
-        cursor.execute(query, update_values)
-        conn.commit()
-
-        descripcion_cambios = []
-        cantidad_modificada = 0.0
-        for key, value in mapped_data.items():
-            if key in producto_actual_dict and value is not None:
-                current_value = producto_actual_dict[key]
-                if current_value is None:
-                    current_value = ''
-                if key in ['es_toxico', 'es_corrosivo', 'es_inflamable']:
-                    value = 1 if value else 0
-                    current_value = 1 if current_value else 0
-                if str(current_value) != str(value):
-                    if key == 'cantidad':
-                        try:
-                            cantidad_anterior = float(current_value) if current_value else 0.0
-                            cantidad_nueva = float(value)
-                            cantidad_modificada = cantidad_nueva - cantidad_anterior
-                        except (ValueError, TypeError) as e:
-                            print(f"Error al calcular cantidad_modificada: {e}")
-                            cantidad_modificada = 0.0
-                    descripcion_cambios.append(f"{key} de {current_value} a {value}")
-
-        if descripcion_cambios:
-            descripcion = f"Modificación de {', '.join(descripcion_cambios)}"
-            print(f"Registrando movimiento: {descripcion}")
-            cursor.execute('''
-                INSERT INTO movimientos_inventario (id_producto, id_usuario, tipo_movimiento, cantidad, precio, fecha_movimiento, descripcion)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                id,
-                current_user['id'],
-                'Modificación',
-                cantidad_modificada,
-                producto_actual_dict['precio'],
-                datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                descripcion
-            ))
-            conn.commit()
-
-        conn.close()
-        print("Producto actualizado correctamente.")
-        return jsonify({
-            'message': 'Producto actualizado correctamente',
-            'cantidad_anterior': cantidad_anterior
-        }), 200
-
-    except Exception as e:
-        print(f"Error al actualizar producto: {str(e)}")
-        if 'conn' in locals():
-            conn.close()
-        return jsonify({'error': f'Error al actualizar producto: {str(e)}'}), 500
-
-@app.route('/api/inventario/<int:id>', methods=['GET'])
-@token_required
-def get_producto(current_user, id):
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT id_producto, producto, cantidad, unit_id, unidad, type_id, tipo AS type, 
-                   precio, stock_minimo, stock_maximo, id_proveedor, proveedor,
-                   estado_verificacion, lote, es_toxico, es_corrosivo, es_inflamable
-            FROM vista_inventario
-            WHERE id_producto = ?
-        """, (id,))
-        product = cursor.fetchone()
-        if product:
-            return jsonify({
-                'id': product['id_producto'],
-                'product': product['producto'],
-                'quantity': product['cantidad'],
-                'unit_id': product['unit_id'],
-                'unit': product['unidad'],
-                'type_id': product['type_id'],
-                'type': product['type'],
-                'precio': product['precio'],
-                'stock_minimo': product['stock_minimo'],
-                'stock_maximo': product['stock_maximo'],
-                'id_proveedor': product['id_proveedor'],
-                'proveedor': product['proveedor'],
-                'estado_verificacion': product['estado_verificacion'],
-                'lote': product['lote'],
-                'es_toxico': bool(product['es_toxico']),
-                'es_corrosivo': bool(product['es_corrosivo']),
-                'es_inflamable': bool(product['es_inflamable'])
-            })
-        return jsonify({'error': 'Producto no encontrado'}), 404
-    except Exception as e:
-        print(f"Error al obtener producto: {e}")
-        return jsonify({'error': str(e)}), 500
-    finally:
-        if 'conn' in locals():
-            conn.close()
-
-# Rutas para manejar proveedores
-@app.route('/api/proveedores', methods=['GET', 'OPTIONS'])
-def get_proveedores():
+def get_usuario(current_user):
     if request.method == 'OPTIONS':
         return '', 200
 
-    @token_required
-    def protected_get_proveedores(current_user):
-        try:
-            conn = get_db_connection()
-            cursor = conn.cursor()
+    # Los datos del usuario ya están disponibles en current_user gracias al decorador token_required
+    return jsonify({
+        'id': current_user['id'],
+        'nombre': current_user['nombre'],
+        'rol': current_user['rol']
+    }), 200
+
+@app.route('/api/reset_password', methods=['POST'])
+def reset_password():
+    try:
+        data = request.get_json()
+        if not data or 'username' not in data:
+            return jsonify({'error': 'Usuario es requerido'}), 400
+
+        username = data['username']
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM users WHERE username = ?', (username,))
+        user = cursor.fetchone()
+
+        if not user:
+            return jsonify({'error': 'Usuario no encontrado'}), 404
+
+        # En un sistema real, aquí enviarías un correo o generarías un token de restablecimiento
+        # Por ahora, solo devolvemos un mensaje
+        return jsonify({'message': 'Solicitud de restablecimiento enviada. Contacta al administrador para obtener tu nueva contraseña.'}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
+
+# Ruta unificada para inventario
+@app.route('/api/inventario', methods=['GET', 'POST'])
+@token_required
+def handle_inventario(current_user):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        if request.method == 'GET':
+            show_all = request.args.get('all', 'false').lower() == 'true'
+            query = """
+                SELECT id_producto, producto, cantidad, unit_id, unidad, type_id, tipo AS type, 
+                       precio, stock_minimo, stock_maximo, id_proveedor, proveedor,
+                       estado_verificacion, lote, es_toxico, es_corrosivo, es_inflamable
+                FROM vista_inventario
+            """
+            params = []
+            if not show_all:
+                query += " WHERE estado_verificacion = 'Verificado'"
+            query += " ORDER BY id_producto"
+            
+            cursor.execute(query, params)
+            productos = cursor.fetchall()
+            return jsonify([{
+                'id': row['id_producto'],
+                'product': row['producto'],
+                'quantity': float(row['cantidad'] or 0),
+                'unit_id': row['unit_id'],
+                'unit': row['unidad'],
+                'type_id': row['type_id'],
+                'type': row['type'],
+                'precio': float(row['precio'] or 0),
+                'stock_minimo': float(row['stock_minimo'] or 0),
+                'stock_maximo': float(row['stock_maximo'] or 0),
+                'id_proveedor': row['id_proveedor'],
+                'proveedor': row['proveedor'],
+                'estado_verificacion': row['estado_verificacion'],
+                'lote': row['lote'] or '',
+                'es_toxico': bool(row['es_toxico']),
+                'es_corrosivo': bool(row['es_corrosivo']),
+                'es_inflamable': bool(row['es_inflamable'])
+            } for row in productos]), 200
+
+        elif request.method == 'POST':
+            data = request.get_json()
+            # Validar los datos de entrada
+            nombre = data.get('nombre')
+            id_unidad = data.get('id_unidad')
+            id_proveedor = data.get('id_proveedor')
+            id_tipo = data.get('id_tipo', 1)
+
+            # Validar campos obligatorios
+            if not nombre or not id_unidad or not id_proveedor or not id_tipo:
+                return jsonify({'error': 'Nombre, unidad, proveedor y tipo son obligatorios'}), 400
+
+            # Validar cantidad y precio
+            try:
+                cantidad = float(data.get('cantidad', 0))
+                precio = float(data.get('precio', 0))
+                stock_minimo = float(data.get('stock_minimo', 0))
+                stock_maximo = float(data.get('stock_maximo', 0))
+            except (ValueError, TypeError):
+                return jsonify({'error': 'Cantidad, precio, stock mínimo y máximo deben ser números válidos'}), 400
+
+            # Validar rangos
+            if cantidad < 0 or precio < 0 or stock_minimo < 0 or stock_maximo < 0:
+                return jsonify({'error': 'Cantidad, precio, stock mínimo y máximo no pueden ser negativos'}), 400
+            if cantidad > 1000000 or precio > 1000000 or stock_minimo > 1000000 or stock_maximo > 1000000:
+                return jsonify({'error': 'Cantidad, precio, stock mínimo y máximo no pueden exceder 1,000,000'}), 400
+            if stock_maximo < stock_minimo:
+                return jsonify({'error': 'El stock máximo no puede ser menor que el stock mínimo'}), 400
+
+            # Validar que id_unidad, id_proveedor e id_tipo existan
+            cursor.execute('SELECT id_unidad FROM unidades_medida WHERE id_unidad = ?', (id_unidad,))
+            if not cursor.fetchone():
+                return jsonify({'error': f'Unidad con ID {id_unidad} no encontrada'}), 404
+
+            cursor.execute('SELECT id_proveedor FROM proveedores WHERE id_proveedor = ?', (id_proveedor,))
+            if not cursor.fetchone():
+                return jsonify({'error': f'Proveedor con ID {id_proveedor} no encontrado'}), 404
+
+            cursor.execute('SELECT id_tipo FROM tipos_producto WHERE id_tipo = ?', (id_tipo,))
+            if not cursor.fetchone():
+                return jsonify({'error': f'Tipo de producto con ID {id_tipo} no encontrado'}), 404
+
+            # Insertar el producto
+            cursor.execute("""
+                INSERT INTO productos (nombre, id_tipo, cantidad, id_unidad, precio, stock_minimo, stock_maximo, id_proveedor, estado_verificacion, lote, es_toxico, es_corrosivo, es_inflamable)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                nombre,
+                id_tipo,
+                cantidad,
+                id_unidad,
+                precio,
+                stock_minimo,
+                stock_maximo,
+                id_proveedor,
+                data.get('estado_verificacion', 'Pendiente'),
+                data.get('lote', ''),
+                bool(data.get('es_toxico', 0)),
+                bool(data.get('es_corrosivo', 0)),
+                bool(data.get('es_inflamable', 0))
+            ))
+            product_id = cursor.lastrowid
+
+            # Registrar el movimiento (solo si cantidad > 0)
+            if cantidad > 0:
+                cursor.execute('''
+                    INSERT INTO movimientos_inventario (id_producto, id_usuario, tipo_movimiento, cantidad, precio, fecha_movimiento, descripcion)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    product_id,
+                    current_user['id'],
+                    'Entrada',
+                    cantidad,
+                    precio,
+                    datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    f"Producto {nombre} agregado al inventario (ID: {product_id})"
+                ))
+
+            conn.commit()
+            return jsonify({'message': 'Producto agregado correctamente', 'id': product_id}), 201
+
+    except Exception as e:
+        conn.rollback()
+        return jsonify({'error': f'No se pudo procesar la solicitud de inventario: {str(e)}'}), 500
+    finally:
+        conn.close()
+
+@app.route('/api/inventario/<int:id>', methods=['GET', 'PUT'])
+@token_required
+def handle_producto(current_user, id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        if request.method == 'GET':
+            cursor.execute("""
+                SELECT id_producto, producto, cantidad, unit_id, unidad, type_id, tipo AS type, 
+                       precio, stock_minimo, stock_maximo, id_proveedor, proveedor,
+                       estado_verificacion, lote, es_toxico, es_corrosivo, es_inflamable
+                FROM vista_inventario
+                WHERE id_producto = ?
+            """, (id,))
+            product = cursor.fetchone()
+            if product:
+                return jsonify({
+                    'id': product['id_producto'],
+                    'product': product['producto'],
+                    'quantity': float(product['cantidad'] or 0),
+                    'unit_id': product['unit_id'],
+                    'unit': product['unidad'],
+                    'type_id': product['type_id'],
+                    'type': product['type'],
+                    'precio': float(product['precio'] or 0),
+                    'stock_minimo': float(product['stock_minimo'] or 0),
+                    'stock_maximo': float(product['stock_maximo'] or 0),
+                    'id_proveedor': product['id_proveedor'],
+                    'proveedor': product['proveedor'],
+                    'estado_verificacion': product['estado_verificacion'],
+                    'lote': product['lote'] or '',
+                    'es_toxico': bool(product['es_toxico']),
+                    'es_corrosivo': bool(product['es_corrosivo']),
+                    'es_inflamable': bool(product['es_inflamable'])
+                }), 200
+            return jsonify({'error': 'Producto no encontrado'}), 404
+
+        elif request.method == 'PUT':
+            data = request.get_json()
+            print(f"Datos recibidos en PUT /api/inventario/{id}: {data}")  # Depuración
+            if not data:
+                return jsonify({'error': 'Se requiere un cuerpo JSON con los datos a actualizar'}), 400
+
+            field_mapping = {
+                'nombre': 'nombre',
+                'quantity': 'cantidad',
+                'precio': 'precio',
+                'id_proveedor': 'id_proveedor',
+                'id_tipo': 'id_tipo',
+                'id_unidad': 'id_unidad',
+                'stock_minimo': 'stock_minimo',
+                'stock_maximo': 'stock_maximo',
+                'lote': 'lote',
+                'estado_verificacion': 'estado_verificacion',
+                'es_toxico': 'es_toxico',
+                'es_corrosivo': 'es_corrosivo',
+                'es_inflamable': 'es_inflamable'
+            }
+
+            # Mapear los datos recibidos
+            mapped_data = {field_mapping.get(key, key): value for key, value in data.items() if value is not None}
+            print(f"Datos mapeados: {mapped_data}")  # Depuración
+
+            # Validar campos numéricos
+            if 'cantidad' in mapped_data:
+                try:
+                    mapped_data['cantidad'] = float(mapped_data['cantidad'])
+                    if mapped_data['cantidad'] < 0 or mapped_data['cantidad'] > 1000000:
+                        return jsonify({'error': 'La cantidad debe estar entre 0 y 1,000,000'}), 400
+                except (ValueError, TypeError):
+                    return jsonify({'error': 'La cantidad debe ser un número válido'}), 400
+
+            if 'precio' in mapped_data:
+                try:
+                    mapped_data['precio'] = float(mapped_data['precio'])
+                    if mapped_data['precio'] < 0 or mapped_data['precio'] > 1000000:
+                        return jsonify({'error': 'El precio debe estar entre 0 y 1,000,000'}), 400
+                except (ValueError, TypeError):
+                    return jsonify({'error': 'El precio debe ser un número válido'}), 400
+
+            if 'stock_minimo' in mapped_data:
+                try:
+                    mapped_data['stock_minimo'] = float(mapped_data['stock_minimo'])
+                    if mapped_data['stock_minimo'] < 0 or mapped_data['stock_minimo'] > 1000000:
+                        return jsonify({'error': 'El stock mínimo debe estar entre 0 y 1,000,000'}), 400
+                except (ValueError, TypeError):
+                    return jsonify({'error': 'El stock mínimo debe ser un número válido'}), 400
+
+            if 'stock_maximo' in mapped_data:
+                try:
+                    mapped_data['stock_maximo'] = float(mapped_data['stock_maximo'])
+                    if mapped_data['stock_maximo'] < 0 or mapped_data['stock_maximo'] > 1000000:
+                        return jsonify({'error': 'El stock máximo debe estar entre 0 y 1,000,000'}), 400
+                except (ValueError, TypeError):
+                    return jsonify({'error': 'El stock máximo debe ser un número válido'}), 400
+
+            # Validar relación entre stock_minimo y stock_maximo
+            new_stock_minimo = mapped_data.get('stock_minimo', None)
+            new_stock_maximo = mapped_data.get('stock_maximo', None)
+            if new_stock_minimo is not None and new_stock_maximo is not None:
+                if new_stock_maximo < new_stock_minimo:
+                    return jsonify({'error': 'El stock máximo no puede ser menor que el stock mínimo'}), 400
+
+            # Obtener el producto actual usando vista_inventario
+            cursor.execute('SELECT * FROM vista_inventario WHERE id_producto = ?', (id,))
+            producto_actual = cursor.fetchone()
+            if not producto_actual:
+                return jsonify({'error': f'El producto con ID {id} no se encontró en el inventario'}), 404
+
+            # Mapear los datos de vista_inventario a los campos de la tabla productos
+            producto_actual_dict = {
+                'id_producto': producto_actual['id_producto'],
+                'nombre': producto_actual['producto'],
+                'cantidad': producto_actual['cantidad'],
+                'id_unidad': producto_actual['unit_id'],
+                'id_tipo': producto_actual['type_id'],
+                'precio': producto_actual['precio'],
+                'stock_minimo': producto_actual['stock_minimo'],
+                'stock_maximo': producto_actual['stock_maximo'],
+                'id_proveedor': producto_actual['id_proveedor'],
+                'estado_verificacion': producto_actual['estado_verificacion'],
+                'lote': producto_actual['lote'],
+                'es_toxico': producto_actual['es_toxico'],
+                'es_corrosivo': producto_actual['es_corrosivo'],
+                'es_inflamable': producto_actual['es_inflamable']
+            }
+            print(f"Datos del producto actual: {producto_actual_dict}")  # Depuración
+
+            # Validar referencias a otras tablas solo si los campos han cambiado
+            if 'id_unidad' in mapped_data and str(mapped_data['id_unidad']) != str(producto_actual_dict['id_unidad']):
+                cursor.execute('SELECT id_unidad FROM unidades_medida WHERE id_unidad = ?', (mapped_data['id_unidad'],))
+                if not cursor.fetchone():
+                    print(f"Validación fallida: Unidad con ID {mapped_data['id_unidad']} no encontrada")  # Depuración
+                    return jsonify({'error': f'Unidad con ID {mapped_data["id_unidad"]} no encontrada'}), 404
+
+            if 'id_proveedor' in mapped_data and str(mapped_data['id_proveedor']) != str(producto_actual_dict['id_proveedor']):
+                cursor.execute('SELECT id_proveedor FROM proveedores WHERE id_proveedor = ?', (mapped_data['id_proveedor'],))
+                if not cursor.fetchone():
+                    print(f"Validación fallida: Proveedor con ID {mapped_data['id_proveedor']} no encontrado")  # Depuración
+                    return jsonify({'error': f'Proveedor con ID {mapped_data["id_proveedor"]} no encontrado'}), 404
+
+            if 'id_tipo' in mapped_data and str(mapped_data['id_tipo']) != str(producto_actual_dict['id_tipo']):
+                cursor.execute('SELECT id_tipo FROM tipos_producto WHERE id_tipo = ?', (mapped_data['id_tipo'],))
+                if not cursor.fetchone():
+                    print(f"Validación fallida: Tipo de producto con ID {mapped_data['id_tipo']} no encontrado")  # Depuración
+                    return jsonify({'error': f'Tipo de producto con ID {mapped_data["id_tipo"]} no encontrado'}), 404
+
+            update_fields = []
+            update_values = []
+            cantidad_anterior = float(producto_actual_dict['cantidad'] or 0)
+            precio_actual = float(producto_actual_dict['precio'] or 0)
+            precio_nuevo = float(mapped_data.get('precio', precio_actual))
+
+            for key, value in mapped_data.items():
+                if key in producto_actual_dict:
+                    current_value = producto_actual_dict[key]
+                    if current_value is None:
+                        current_value = ''
+                    if key in ['es_toxico', 'es_corrosivo', 'es_inflamable']:
+                        value = 1 if value else 0
+                        current_value = 1 if current_value else 0
+                    if str(current_value) != str(value):
+                        update_fields.append(f"{key} = ?")
+                        update_values.append(value)
+
+            if not update_fields:
+                return jsonify({'message': 'No se realizaron cambios'}), 200
+
+            update_fields.append("fecha_actualizacion = ?")
+            update_values.append(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+            update_values.append(id)
+
+            query = f"UPDATE productos SET {', '.join(update_fields)} WHERE id_producto = ?"
+            cursor.execute(query, update_values)
+
+            # Registrar el movimiento si hay cambios
+            descripcion_cambios = []
+            cantidad_modificada = 0.0
+            for key, value in mapped_data.items():
+                if key in producto_actual_dict:
+                    current_value = producto_actual_dict[key]
+                    if current_value is None:
+                        current_value = ''
+                    if key in ['es_toxico', 'es_corrosivo', 'es_inflamable']:
+                        value = 1 if value else 0
+                        current_value = 1 if current_value else 0
+                    if str(current_value) != str(value):
+                        if key == 'cantidad':
+                            cantidad_nueva = float(value)
+                            cantidad_modificada = cantidad_nueva - cantidad_anterior
+                        descripcion_cambios.append(f"{key} de {current_value} a {value}")
+
+            if descripcion_cambios:
+                descripcion = f"Modificación de {', '.join(descripcion_cambios)}"
+                if cantidad_modificada != 0:  # Solo registrar movimiento si la cantidad cambió
+                    cursor.execute('''
+                        INSERT INTO movimientos_inventario (id_producto, id_usuario, tipo_movimiento, cantidad, precio, fecha_movimiento, descripcion)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        id,
+                        current_user['id'],
+                        'Modificación',
+                        cantidad_modificada,
+                        precio_nuevo,
+                        datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                        descripcion
+                    ))
+
+            conn.commit()
+            return jsonify({
+                'message': 'Producto actualizado correctamente',
+                'cantidad_anterior': cantidad_anterior
+            }), 200
+
+    except Exception as e:
+        conn.rollback()
+        return jsonify({'error': f'Error al manejar producto: {str(e)}'}), 500
+    finally:
+        conn.close()
+
+# Rutas para manejar proveedores
+@app.route('/api/proveedores', methods=['GET', 'POST', 'OPTIONS'])
+@token_required
+def handle_proveedores(current_user):
+    if request.method == 'OPTIONS':
+        return '', 200
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        if request.method == 'GET':
             cursor.execute('SELECT * FROM proveedores')
             proveedores = cursor.fetchall()
             return jsonify([dict(row) for row in proveedores]), 200
-        except Exception as e:
-            print(f"Error al obtener proveedores: {str(e)}")
-            return jsonify({'error': str(e)}), 500
-        finally:
-            if 'conn' in locals():
-                conn.close()
 
-    return protected_get_proveedores()
-
-@app.route('/api/proveedores/<int:id>', methods=['GET', 'OPTIONS'])
-def get_proveedor(id):
-    if request.method == 'OPTIONS':
-        return '', 200
-
-    @token_required
-    def protected_get_proveedor(current_user, id):
-        try:
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute('SELECT * FROM proveedores WHERE id_proveedor = ?', (id,))
-            proveedor = cursor.fetchone()
-            if not proveedor:
-                return jsonify({'error': 'Proveedor no encontrado'}), 404
-            return jsonify(dict(proveedor)), 200
-        except Exception as e:
-            print(f"Error al obtener proveedor: {str(e)}")
-            return jsonify({'error': str(e)}), 500
-        finally:
-            if 'conn' in locals():
-                conn.close()
-
-    return protected_get_proveedor(id)
-
-@app.route('/api/proveedores', methods=['POST', 'OPTIONS'])
-def create_proveedor():
-    if request.method == 'OPTIONS':
-        return '', 200
-
-    @token_required
-    def protected_create_proveedor(current_user):
-        try:
+        elif request.method == 'POST':
             data = request.get_json()
             nombre = data.get('nombre')
             contacto = data.get('contacto')
@@ -444,39 +583,42 @@ def create_proveedor():
 
             telefono_regex = r'^\+?\d{9,15}$'
             if not re.match(telefono_regex, telefono):
-                return jsonify({'error': 'Formato de teléfono inválido. Debe contener entre 9 y 15 dígitos, opcionalmente con un "+" al inicio.'}), 400
-
-            conn = get_db_connection()
-            cursor = conn.cursor()
+                return jsonify({'error': 'Formato de teléfono inválido.'}), 400
 
             cursor.execute('SELECT id_proveedor FROM proveedores WHERE email = ?', (email,))
             if cursor.fetchone():
-                return jsonify({'error': 'El email ya está registrado para otro proveedor'}), 400
+                return jsonify({'error': 'El email ya está registrado'}), 400
 
             cursor.execute('''
                 INSERT INTO proveedores (nombre, contacto, telefono, email)
                 VALUES (?, ?, ?, ?)
             ''', (nombre, contacto, telefono, email))
-
             conn.commit()
             return jsonify({'message': 'Proveedor creado exitosamente'}), 201
-        except Exception as e:
-            print(f"Error al crear proveedor: {str(e)}")
-            return jsonify({'error': str(e)}), 500
-        finally:
-            if 'conn' in locals():
-                conn.close()
 
-    return protected_create_proveedor()
+    except Exception as e:
+        conn.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
 
-@app.route('/api/proveedores/<int:id>', methods=['PUT', 'OPTIONS'])
-def update_proveedor(id):
+@app.route('/api/proveedores/<int:id>', methods=['GET', 'PUT', 'DELETE', 'OPTIONS'])
+@token_required
+def handle_proveedor(current_user, id):
     if request.method == 'OPTIONS':
         return '', 200
 
-    @token_required
-    def protected_update_proveedor(current_user, id):
-        try:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        if request.method == 'GET':
+            cursor.execute('SELECT * FROM proveedores WHERE id_proveedor = ?', (id,))
+            proveedor = cursor.fetchone()
+            if not proveedor:
+                return jsonify({'error': 'Proveedor no encontrado'}), 404
+            return jsonify(dict(proveedor)), 200
+
+        elif request.method == 'PUT':
             data = request.get_json()
             nombre = data.get('nombre')
             contacto = data.get('contacto')
@@ -492,583 +634,303 @@ def update_proveedor(id):
 
             telefono_regex = r'^\+?\d{9,15}$'
             if not re.match(telefono_regex, telefono):
-                return jsonify({'error': 'Formato de teléfono inválido. Debe contener entre 9 y 15 dígitos, opcionalmente con un "+" al inicio.'}), 400
-
-            conn = get_db_connection()
-            cursor = conn.cursor()
+                return jsonify({'error': 'Formato de teléfono inválido.'}), 400
 
             cursor.execute('SELECT id_proveedor FROM proveedores WHERE email = ? AND id_proveedor != ?', (email, id))
             if cursor.fetchone():
-                return jsonify({'error': 'El email ya está registrado para otro proveedor'}), 400
+                return jsonify({'error': 'El email ya está registrado'}), 400
 
             cursor.execute('''
                 UPDATE proveedores
                 SET nombre = ?, contacto = ?, telefono = ?, email = ?
                 WHERE id_proveedor = ?
             ''', (nombre, contacto, telefono, email, id))
-
             if cursor.rowcount == 0:
                 return jsonify({'error': 'Proveedor no encontrado'}), 404
-
             conn.commit()
             return jsonify({'message': 'Proveedor actualizado exitosamente'}), 200
-        except Exception as e:
-            print(f"Error al actualizar proveedor: {str(e)}")
-            return jsonify({'error': str(e)}), 500
-        finally:
-            if 'conn' in locals():
-                conn.close()
 
-    return protected_update_proveedor(id)
-
-@app.route('/api/proveedores/<int:id>', methods=['DELETE', 'OPTIONS'])
-def delete_proveedor(id):
-    if request.method == 'OPTIONS':
-        return '', 200
-
-    @token_required
-    def protected_delete_proveedor(current_user, id):
-        try:
-            conn = get_db_connection()
-            cursor = conn.cursor()
-
+        elif request.method == 'DELETE':
             cursor.execute('SELECT id_producto FROM productos WHERE id_proveedor = ?', (id,))
             if cursor.fetchone():
                 return jsonify({'error': 'No se puede eliminar el proveedor porque está asociado a productos'}), 400
 
             cursor.execute('DELETE FROM proveedores WHERE id_proveedor = ?', (id,))
-
             if cursor.rowcount == 0:
                 return jsonify({'error': 'Proveedor no encontrado'}), 404
-
             conn.commit()
             return jsonify({'message': 'Proveedor eliminado exitosamente'}), 200
-        except Exception as e:
-            print(f"Error al eliminar proveedor: {str(e)}")
-            return jsonify({'error': str(e)}), 500
-        finally:
-            if 'conn' in locals():
-                conn.close()
 
-    return protected_delete_proveedor(id)
+    except Exception as e:
+        conn.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
 
 # Rutas para manejar procesos guardados
 @app.route('/api/procesos_guardados', methods=['GET', 'OPTIONS'])
-def get_procesos_guardados():
-    if request.method == 'OPTIONS':
-        return '', 200
-
-    @token_required
-    def protected_get_procesos_guardados(current_user):
-        try:
-            conn = get_db_connection()
-            procesos = conn.execute('SELECT id_proceso_guardado, nombre_proceso, maquina_predeterminada, tiempo_estimado, descripcion FROM procesos_guardados ORDER BY id_proceso_guardado').fetchall()
-            procesos_list = [{
-                'id_proceso_guardado': row['id_proceso_guardado'],
-                'nombre_proceso': row['nombre_proceso'],
-                'maquina_predeterminada': row['maquina_predeterminada'],
-                'tiempo_estimado': row['tiempo_estimado'],
-                'descripcion': row['descripcion']
-            } for row in procesos]
-            return jsonify(procesos_list)
-        except Exception as e:
-            print(f"Error al cargar procesos guardados: {type(e).__name__} - {str(e)}")
-            return jsonify({'error': f"{type(e).__name__}: {str(e)}"}), 500
-        finally:
-            if 'conn' in locals():
-                conn.close()
-
-    return protected_get_procesos_guardados()
-
-@app.route('/api/prototipos', methods=['GET', 'POST', 'OPTIONS'])
-def handle_prototipos():
-    if request.method == 'OPTIONS':
-        return '', 200
-    return protected_prototipos()
-
 @token_required
-def protected_prototipos(current_user):
-    conn = None
+def get_procesos_guardados(current_user):
+    if request.method == 'OPTIONS':
+        return '', 200
+
+    conn = get_db_connection()
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        print("Conexión a la base de datos establecida correctamente")  # Depuración
+        procesos = conn.execute('SELECT id_proceso_guardado, nombre_proceso, maquina_predeterminada, tiempo_estimado, descripcion FROM procesos_guardados ORDER BY id_proceso_guardado').fetchall()
+        procesos_list = [{
+            'id_proceso_guardado': row['id_proceso_guardado'],
+            'nombre_proceso': row['nombre_proceso'],
+            'maquina_predeterminada': row['maquina_predeterminada'],
+            'tiempo_estimado': row['tiempo_estimado'],
+            'descripcion': row['descripcion']
+        } for row in procesos]
+        return jsonify(procesos_list), 200
+    except Exception as e:
+        return jsonify({'error': f"{str(e)}"}), 500
+    finally:
+        conn.close()
 
+# Rutas para prototipos (corregidas)
+@app.route('/api/prototipos', methods=['GET', 'POST'])
+@token_required
+def handle_prototipos(current_user):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
         if request.method == 'GET':
-            # Obtener todos los prototipos
-            print("Obteniendo todos los prototipos...")
-            cursor.execute('SELECT * FROM prototipos WHERE id_usuario = ? ORDER BY id_prototipo', (current_user['id'],))
-            prototipos = cursor.fetchall()
-            print(f"Prototipos obtenidos: {[dict(row) for row in prototipos]}")  # Depuración
+            cursor.execute('SELECT * FROM prototipos')
+            prototipos = cursor.fetchall() or []
             prototipos_list = []
-
-            # Depurar el contenido de la tabla etapas
-            print("Depurando contenido de la tabla etapas...")
-            cursor.execute('SELECT * FROM etapas_prototipos')  # Ajustamos el nombre de la tabla a etapas_prototipos
-            todas_etapas = cursor.fetchall()
-            todas_etapas_list = [dict(row) for row in todas_etapas]
-            print(f"Contenido completo de la tabla etapas_prototipos: {todas_etapas_list}")
-
             for prototipo in prototipos:
-                # Obtener las etapas de cada prototipo
-                print(f"Buscando etapas para el prototipo {prototipo['id_prototipo']}")
-                cursor.execute('SELECT * FROM etapas_prototipos WHERE id_prototipo = ?', (prototipo['id_prototipo'],))
-                etapas = cursor.fetchall()
-                print(f"Etapas para prototipo {prototipo['id_prototipo']}: {[dict(row) for row in etapas]}")  # Depuración
-                etapas_list = []
+                # Obtener materiales asociados
+                cursor.execute('SELECT * FROM materiales_prototipo WHERE id_prototipo = ?', (prototipo['id_prototipo'],))
+                materiales = cursor.fetchall() or []
+                material_details = []
                 stock_suficiente = True
-                stock_detalles = []
-
-                # Verificar stock para cada etapa
-                for etapa in etapas:
-                    print(f"Verificando stock para producto {etapa['id_producto']} en etapa {etapa['id_etapa_prototipo']}")
-                    cursor.execute('SELECT id_producto, nombre, cantidad FROM productos WHERE id_producto = ?', (etapa['id_producto'],))
+                for material in materiales:
+                    cursor.execute('SELECT cantidad FROM productos WHERE id_producto = ?', (material['id_producto'],))
                     producto = cursor.fetchone()
-                    print(f"Producto {etapa['id_producto']} para etapa {etapa['id_etapa_prototipo']}: {producto}")  # Depuración
-
-                    if not producto:
-                        print(f"Advertencia: Producto con ID {etapa['id_producto']} no encontrado para etapa {etapa['id_etapa_prototipo']}")
-                        cantidad_disponible = 0
-                    else:
-                        cantidad_disponible = float(producto['cantidad'])
-
-                    cantidad_requerida = float(etapa['cantidad_requerida'])
-
-                    etapa_dict = {
-                        'id_etapa_prototipo': etapa['id_etapa_prototipo'],
-                        'id_proceso': etapa['id_proceso'],
-                        'id_producto': etapa['id_producto'],
-                        'cantidad_requerida': cantidad_requerida,
-                        'tiempo': int(etapa['tiempo']),
-                        'nombre_proceso': etapa['nombre_proceso'],
-                        'nombre_producto': etapa['nombre_producto'],
-                        'stock_disponible': cantidad_disponible,
-                        'stock_suficiente': cantidad_requerida <= cantidad_disponible
-                    }
-                    etapas_list.append(etapa_dict)
-
-                    if cantidad_requerida > cantidad_disponible:
+                    cantidad_disponible = producto['cantidad'] if producto else 0
+                    if cantidad_disponible < material['cantidad']:
                         stock_suficiente = False
-                        stock_detalles.append({
-                            'producto': etapa['nombre_producto'],
-                            'cantidad_requerida': cantidad_requerida,
-                            'cantidad_disponible': cantidad_disponible
-                        })
-
-                # Agregar el prototipo a la lista
+                    material_details.append({
+                        'id_producto': material['id_producto'],
+                        'cantidad': material['cantidad'],
+                        'disponible': cantidad_disponible
+                    })
                 prototipos_list.append({
                     'id_prototipo': prototipo['id_prototipo'],
                     'nombre': prototipo['nombre'],
-                    'responsable': prototipo['responsable'],
-                    'notas': prototipo['notas'],
                     'estado': prototipo['estado'],
-                    'fecha_creacion': prototipo['fecha_creacion'],
-                    'id_usuario': prototipo['id_usuario'],
-                    'etapas': etapas_list,
-                    'stock_suficiente': stock_suficiente,
-                    'stock_detalles': stock_detalles
+                    'responsable': prototipo['responsable'],
+                    'fecha': prototipo['fecha'],
+                    'materiales': material_details,
+                    'stockSuficiente': stock_suficiente
                 })
-
-            print(f"Prototipos listos para enviar: {prototipos_list}")
             return jsonify(prototipos_list), 200
 
         elif request.method == 'POST':
             data = request.get_json()
-            print(f"Datos recibidos para crear prototipo: {data}")
+            if not data or 'nombre' not in data or 'responsable' not in data or 'estado' not in data:
+                return jsonify({'error': 'Nombre, responsable y estado son requeridos'}), 400
 
-            # Validar datos
-            if not data or 'nombre' not in data or 'responsable' not in data or 'estado' not in data or 'etapas' not in data:
-                print("Error: Faltan campos requeridos en los datos")
-                return jsonify({'error': 'Nombre, responsable, estado y etapas son requeridos'}), 400
-
-            nombre = data['nombre']
-            responsable = data['responsable']
-            notas = data.get('notas', '')
-            estado = data['estado']
-            etapas = data['etapas']
-
-            # Validar etapas
-            if not isinstance(etapas, list):
-                print("Error: Las etapas deben ser una lista")
-                return jsonify({'error': 'Las etapas deben ser una lista'}), 400
-            if len(etapas) == 0:
-                print("Error: Se requiere al menos una etapa")
-                return jsonify({'error': 'Se requiere al menos una etapa'}), 400
-
-            for etapa in etapas:
-                required_keys = ['id_proceso', 'id_producto', 'cantidad_requerida', 'tiempo', 'nombre_proceso', 'nombre_producto']
-                if not all(key in etapa for key in required_keys):
-                    print(f"Error: Faltan datos en una etapa: {etapa}")
-                    return jsonify({'error': 'Faltan datos en una etapa'}), 400
-                if not isinstance(etapa['cantidad_requerida'], (int, float)) or etapa['cantidad_requerida'] <= 0:
-                    print(f"Error: Cantidad inválida en etapa: {etapa['cantidad_requerida']}")
-                    return jsonify({'error': 'La cantidad debe ser mayor que 0'}), 400
-                if not isinstance(etapa['tiempo'], int) or etapa['tiempo'] <= 0:
-                    print(f"Error: Tiempo inválido en etapa: {etapa['tiempo']}")
-                    return jsonify({'error': 'El tiempo debe ser un entero mayor que 0'}), 400
-
-            # Verificar stock disponible
-            for etapa in etapas:
-                print(f"Verificando stock para producto {etapa['id_producto']}")
-                cursor.execute('SELECT id_producto, nombre, cantidad FROM productos WHERE id_producto = ?', (etapa['id_producto'],))
-                producto = cursor.fetchone()
-                print(f"Producto encontrado: {producto}")
-                if not producto:
-                    print(f"Error: Producto con ID {etapa['id_producto']} no encontrado")
-                    return jsonify({
-                        'error': f"Producto con ID {etapa['id_producto']} no encontrado",
-                        'nombre_enviado': etapa['nombre_producto']
-                    }), 404
-                cantidad_disponible = float(producto['cantidad'])
-                print(f"Cantidad disponible para {producto['nombre']}: {cantidad_disponible}")
-                if etapa['cantidad_requerida'] > cantidad_disponible:
-                    print(f"Error: Stock insuficiente para producto {etapa['nombre_producto']} (disponible: {cantidad_disponible}, requerido: {etapa['cantidad_requerida']})")
-                    return jsonify({
-                        'error': f"No hay suficiente stock para el producto {etapa['nombre_producto']}",
-                        'detalle': f"Disponible: {cantidad_disponible}, Requerido: {etapa['cantidad_requerida']}"
-                    }), 400
-
-            # Insertar prototipo
-            print("Insertando nuevo prototipo...")
-            cursor.execute(
-                '''
-                INSERT INTO prototipos (nombre, responsable, notas, estado, id_usuario, fecha_creacion)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ''',
-                (nombre, responsable, notas, estado, current_user['id'], datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-            )
+            cursor.execute('INSERT INTO prototipos (nombre, estado, responsable, fecha) VALUES (?, ?, ?, ?)',
+                           (data['nombre'], data['estado'], data['responsable'], datetime.now().strftime('%Y-%m-%d')))
             id_prototipo = cursor.lastrowid
-            print(f"Prototipo creado con ID: {id_prototipo}")
 
-            # Insertar etapas
-            for etapa in etapas:
-                print(f"Insertando etapa: {etapa}")
-                cursor.execute(
-                    '''
-                    INSERT INTO etapas_prototipos (id_prototipo, id_proceso, id_producto, cantidad_requerida, tiempo, nombre_proceso, nombre_producto)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ''',
-                    (id_prototipo, etapa['id_proceso'], etapa['id_producto'], etapa['cantidad_requerida'],
-                     etapa['tiempo'], etapa['nombre_proceso'], etapa['nombre_producto'])
-                )
+            if 'materiales' in data and data['materiales']:
+                for material in data['materiales']:
+                    cursor.execute('INSERT INTO materiales_prototipo (id_prototipo, id_producto, cantidad) VALUES (?, ?, ?)',
+                                   (id_prototipo, material['id_producto'], material['cantidad']))
 
-            # Descontar cantidades del inventario
-            for etapa in etapas:
-                print(f"Descontando {etapa['cantidad_requerida']} unidades del producto {etapa['id_producto']}")
-                cursor.execute(
-                    'UPDATE productos SET cantidad = cantidad - ? WHERE id_producto = ?',
-                    (etapa['cantidad_requerida'], etapa['id_producto'])
-                )
-
-            # Insertar en historial de estados
-            print("Insertando en historial de estados...")
-            cursor.execute(
-                '''
-                INSERT INTO historial_estados_prototipos (id_prototipo, estado_anterior, estado_nuevo, fecha_cambio, usuario_cambio)
-                VALUES (?, ?, ?, ?, ?)
-                ''',
-                (id_prototipo, None, estado, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), current_user['nombre'])
-            )
-
-            # Confirmar la transacción
             conn.commit()
-            print(f"Prototipo {id_prototipo} creado con éxito")
-
             return jsonify({'message': 'Prototipo creado correctamente', 'id_prototipo': id_prototipo}), 201
 
     except Exception as e:
-        if conn:
-            conn.rollback()
-            print("Transacción revertida debido a un error")
-        print(f"Error al manejar prototipos: {type(e).__name__} - {str(e)}")
-        return jsonify({'error': f"Error: {str(e)}"}), 500
+        conn.rollback()
+        return jsonify({'error': str(e)}), 500
     finally:
-        if conn:
-            conn.close()
-            print("Conexión a la base de datos cerrada")
+        conn.close()
 
-@app.route('/api/inventario', methods=['GET', 'OPTIONS'])
-def handle_inventario():
-    if request.method == 'OPTIONS':
-        return '', 200
-    return protected_inventario()
-
+@app.route('/api/prototipos/<int:id>', methods=['GET', 'PUT', 'DELETE'])
 @token_required
-def protected_inventario(current_user):
-    conn = None
+def handle_prototipo(current_user, id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        print("Obteniendo inventario...")
-        cursor.execute('SELECT * FROM productos')
-        productos = cursor.fetchall()
-        print(f"Productos crudos desde la base de datos: {productos}")
-        productos_list = [dict(row) for row in productos]
-        print(f"Productos después de convertir a lista de diccionarios: {productos_list}")
-        return jsonify(productos_list), 200
-    except Exception as e:
-        print(f"Error al obtener inventario: {type(e).__name__} - {str(e)}")
-        return jsonify({'error': f"Error: {str(e)}"}), 500
-    finally:
-        if conn:
-            conn.close()
-            print("Conexión a la base de datos cerrada")
-
-@app.route('/api/inventario/all', methods=['GET', 'OPTIONS'])
-def handle_inventario_all():
-    if request.method == 'OPTIONS':
-        return '', 200
-    return protected_inventario_all()
-
-@token_required
-def protected_inventario_all(current_user):
-    conn = None
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        print("Obteniendo todos los productos (sin filtro de verificación)...")
-        cursor.execute('SELECT * FROM productos')
-        productos = cursor.fetchall()
-        productos_list = [dict(row) for row in productos]
-        print(f"Productos devueltos por /api/inventario/all: {productos_list}")
-        return jsonify(productos_list), 200
-    except Exception as e:
-        print(f"Error al obtener inventario completo: {type(e).__name__} - {str(e)}")
-        return jsonify({'error': f"Error: {str(e)}"}), 500
-    finally:
-        if conn:
-            conn.close()
-            print("Conexión a la base de datos cerrada")
-
-@app.route('/api/prototipos/<int:id_prototipo>', methods=['GET', 'PUT', 'OPTIONS'])
-def get_prototipo(id_prototipo):
-    # Manejar solicitudes OPTIONS sin autenticación
-    if request.method == 'OPTIONS':
-        return '', 200
-
-    # Aplicar autenticación para otras solicitudes (GET, PUT)
-    @token_required
-    def protected_get_prototipo(current_user, id_prototipo):
-        conn = None
-        try:
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            print("Conexión a la base de datos establecida correctamente")  # Depuración
-
-            # Buscar el prototipo
-            print(f"Buscando prototipo con ID: {id_prototipo}")
-            cursor.execute('SELECT * FROM prototipos WHERE id_prototipo = ?', (id_prototipo,))
+        if request.method == 'GET':
+            cursor.execute('SELECT * FROM prototipos WHERE id_prototipo = ?', (id,))
             prototipo = cursor.fetchone()
             if not prototipo:
-                print(f"Prototipo con ID {id_prototipo} no encontrado")
                 return jsonify({'error': 'Prototipo no encontrado'}), 404
-            print(f"Prototipo encontrado: {prototipo}")
 
-            # Verificar permisos
-            print(f"ID de usuario del prototipo: {prototipo['id_usuario']}, ID de usuario del token: {current_user['id']}")
-            if prototipo['id_usuario'] != current_user['id']:
-                print("Error: El usuario no tiene permiso para acceder a este prototipo")
-                return jsonify({'error': 'No tienes permiso para acceder a este prototipo'}), 403
+            cursor.execute('SELECT * FROM materiales_prototipo WHERE id_prototipo = ?', (id,))
+            materiales = cursor.fetchall() or []
+            material_details = []
+            for material in materiales:
+                material_details.append({
+                    'id_producto': material['id_producto'],
+                    'cantidad': material['cantidad']
+                })
 
-            if request.method == 'GET':
-                # Obtener las etapas
-                print(f"Buscando etapas para el prototipo {id_prototipo}")
-                cursor.execute('SELECT * FROM etapas_prototipos WHERE id_prototipo = ?', (id_prototipo,))
-                etapas = cursor.fetchall()
-                etapas_list = [{
-                    'id_etapa_prototipo': etapa['id_etapa_prototipo'],
-                    'id_proceso': etapa['id_proceso'],
-                    'id_producto': etapa['id_producto'],
-                    'cantidad_requerida': float(etapa['cantidad_requerida']),  # Asegurarse de que sea float
-                    'tiempo': int(etapa['tiempo']),  # Asegurarse de que sea int
-                    'nombre_proceso': etapa['nombre_proceso'],
-                    'nombre_producto': etapa['nombre_producto']
-                } for etapa in etapas]
-                print(f"Etapas encontradas: {len(etapas_list)}")
+            return jsonify({
+                'id_prototipo': prototipo['id_prototipo'],
+                'nombre': prototipo['nombre'],
+                'estado': prototipo['estado'],
+                'responsable': prototipo['responsable'],
+                'fecha': prototipo['fecha'],
+                'materiales': material_details
+            }), 200
 
-                # Construir la respuesta
-                response = {
-                    'prototipo': {
-                        'id_prototipo': prototipo['id_prototipo'],
-                        'nombre': prototipo['nombre'],
-                        'responsable': prototipo['responsable'],
-                        'notas': prototipo['notas'],
-                        'estado': prototipo['estado'],
-                        'fecha_creacion': prototipo['fecha_creacion']
-                    },
-                    'etapas': etapas_list
+        elif request.method == 'PUT':
+            data = request.get_json()
+            if not data:
+                return jsonify({'error': 'Se requiere un cuerpo JSON con los datos a actualizar'}), 400
+
+            cursor.execute('SELECT * FROM prototipos WHERE id_prototipo = ?', (id,))
+            if not cursor.fetchone():
+                return jsonify({'error': 'Prototipo no encontrado'}), 404
+
+            update_fields = []
+            update_values = []
+            for key in ['nombre', 'estado', 'responsable']:
+                if key in data and data[key] is not None:
+                    update_fields.append(f"{key} = ?")
+                    update_values.append(data[key])
+
+            if update_fields:
+                update_values.append(id)
+                query = f"UPDATE prototipos SET {', '.join(update_fields)} WHERE id_prototipo = ?"
+                cursor.execute(query, update_values)
+
+            if 'materiales' in data:
+                cursor.execute('DELETE FROM materiales_prototipo WHERE id_prototipo = ?', (id,))
+                for material in data['materiales']:
+                    cursor.execute('INSERT INTO materiales_prototipo (id_prototipo, id_producto, cantidad) VALUES (?, ?, ?)',
+                                   (id, material['id_producto'], material['cantidad']))
+
+            conn.commit()
+            return jsonify({'message': 'Prototipo actualizado correctamente'}), 200
+
+        elif request.method == 'DELETE':
+            cursor.execute('SELECT * FROM prototipos WHERE id_prototipo = ?', (id,))
+            if not cursor.fetchone():
+                return jsonify({'error': 'Prototipo no encontrado'}), 404
+
+            cursor.execute('DELETE FROM materiales_prototipo WHERE id_prototipo = ?', (id,))
+            cursor.execute('DELETE FROM etapas WHERE id_prototipo = ?', (id,))
+            cursor.execute('DELETE FROM prototipos WHERE id_prototipo = ?', (id,))
+            conn.commit()
+            return jsonify({'message': 'Prototipo eliminado correctamente'}), 200
+
+    except Exception as e:
+        conn.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
+
+@app.route('/api/prototipos/<int:id>/etapas', methods=['GET', 'POST'])
+@token_required
+def handle_etapas(current_user, id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        if request.method == 'GET':
+            cursor.execute('SELECT * FROM prototipos WHERE id_prototipo = ?', (id,))
+            if not cursor.fetchone():
+                return jsonify({'error': 'Prototipo no encontrado'}), 404
+
+            cursor.execute('SELECT * FROM etapas WHERE id_prototipo = ?', (id,))
+            etapas = cursor.fetchall() or []
+            etapas_list = [
+                {
+                    'id_etapa': etapa['id_etapa'],
+                    'nombre': etapa['nombre'],
+                    'fecha': etapa['fecha'],
+                    'estado': etapa['estado']
                 }
-                return jsonify(response), 200
+                for etapa in etapas
+            ]
+            return jsonify(etapas_list), 200
 
-            elif request.method == 'PUT':
-                data = request.get_json()
-                print(f"Datos recibidos para actualizar prototipo {id_prototipo}: {data}")
+        elif request.method == 'POST':
+            data = request.get_json()
+            if not data or 'nombre' not in data or 'fecha' not in data or 'estado' not in data:
+                return jsonify({'error': 'Nombre, fecha y estado son requeridos'}), 400
 
-                # Validar datos
-                if not data or 'nombre' not in data or 'responsable' not in data or 'estado' not in data or 'etapas' not in data:
-                    print("Error: Faltan campos requeridos en los datos")
-                    return jsonify({'error': 'Nombre, responsable, estado y etapas son requeridos'}), 400
+            cursor.execute('SELECT * FROM prototipos WHERE id_prototipo = ?', (id,))
+            if not cursor.fetchone():
+                return jsonify({'error': 'Prototipo no encontrado'}), 404
 
-                nombre = data['nombre']
-                responsable = data['responsable']
-                notas = data.get('notas', '')
-                estado = data['estado']
-                etapas = data['etapas']
+            cursor.execute('INSERT INTO etapas (id_prototipo, nombre, fecha, estado) VALUES (?, ?, ?, ?)',
+                           (id, data['nombre'], data['fecha'], data['estado']))
+            conn.commit()
+            return jsonify({'message': 'Etapa creada correctamente'}), 201
 
-                # Validar etapas
-                if not isinstance(etapas, list):
-                    print("Error: Las etapas deben ser una lista")
-                    return jsonify({'error': 'Las etapas deben ser una lista'}), 400
-                if len(etapas) == 0:
-                    print("Error: Se requiere al menos una etapa")
-                    return jsonify({'error': 'Se requiere al menos una etapa'}), 400
+    except Exception as e:
+        conn.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
 
-                for etapa in etapas:
-                    required_keys = ['id_proceso', 'id_producto', 'cantidad_requerida', 'tiempo', 'nombre_proceso', 'nombre_producto']
-                    if not all(key in etapa for key in required_keys):
-                        print(f"Error: Faltan datos en una etapa: {etapa}")
-                        return jsonify({'error': 'Faltan datos en una etapa'}), 400
-                    if not isinstance(etapa['cantidad_requerida'], (int, float)) or etapa['cantidad_requerida'] <= 0:
-                        print(f"Error: Cantidad inválida en etapa: {etapa['cantidad_requerida']}")
-                        return jsonify({'error': 'La cantidad debe ser mayor que 0'}), 400
-                    if not isinstance(etapa['tiempo'], int) or etapa['tiempo'] <= 0:
-                        print(f"Error: Tiempo inválido en etapa: {etapa['tiempo']}")
-                        return jsonify({'error': 'El tiempo debe ser un entero mayor que 0'}), 400
+@app.route('/api/prototipos/<int:id>/etapas/<int:id_etapa>', methods=['DELETE'])
+@token_required
+def delete_etapa(current_user, id, id_etapa):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT * FROM prototipos WHERE id_prototipo = ?', (id,))
+        if not cursor.fetchone():
+            return jsonify({'error': 'Prototipo no encontrado'}), 404
 
-                # Verificar stock disponible
-                for etapa in etapas:
-                    print(f"Verificando stock para producto {etapa['id_producto']}")
-                    try:
-                        cursor.execute('SELECT * FROM productos WHERE id_producto = ?', (etapa['id_producto'],))
-                        producto = cursor.fetchone()
-                        print(f"Resultado completo de la consulta para id_producto {etapa['id_producto']}: {producto}")
-                        if not producto:
-                            print(f"Intentando buscar con 'id' en lugar de 'id_producto'...")
-                            cursor.execute('SELECT * FROM productos WHERE id_producto = ?', (etapa['id_producto'],))
-                            producto = cursor.fetchone()
-                            print(f"Resultado con 'id_producto': {producto}")
-                        if not producto:
-                            print(f"Error: Producto con ID {etapa['id_producto']} no encontrado en la base de datos")
-                            return jsonify({
-                                'error': f"Producto con ID {etapa['id_producto']} no encontrado",
-                                'nombre_enviado': etapa['nombre_producto']
-                            }), 404
-                        producto_dict = dict(producto)
-                        print(f"Producto convertido a diccionario: {producto_dict}")
-                        cantidad_disponible = float(producto_dict.get('cantidad', producto_dict.get('quantity', 0)))
-                        nombre_producto = producto_dict.get('nombre', producto_dict.get('product', 'Desconocido'))
-                        print(f"Cantidad disponible para {nombre_producto}: {cantidad_disponible}")
-                        if etapa['cantidad_requerida'] > cantidad_disponible:
-                            print(f"Error: Stock insuficiente para producto {etapa['nombre_producto']} (disponible: {cantidad_disponible}, requerido: {etapa['cantidad_requerida']})")
-                            return jsonify({
-                                'error': f"No hay suficiente stock para el producto {etapa['nombre_producto']}",
-                                'detalle': f"Disponible: {cantidad_disponible}, Requerido: {etapa['cantidad_requerida']}"
-                            }), 400
-                    except Exception as e:
-                        print(f"Error al verificar stock para id_producto {etapa['id_producto']}: {type(e).__name__} - {str(e)}")
-                        return jsonify({'error': f"Error al verificar stock: {str(e)}"}), 500
+        cursor.execute('SELECT * FROM etapas WHERE id_etapa = ? AND id_prototipo = ?', (id_etapa, id))
+        if not cursor.fetchone():
+            return jsonify({'error': 'Etapa no encontrada'}), 404
 
-                # Obtener el estado actual del prototipo
-                estado_anterior = prototipo['estado']
-                print(f"Estado anterior del prototipo: {estado_anterior}, Nuevo estado: {estado}")
+        cursor.execute('DELETE FROM etapas WHERE id_etapa = ? AND id_prototipo = ?', (id_etapa, id))
+        conn.commit()
+        return jsonify({'message': 'Etapa eliminada correctamente'}), 200
 
-                # Actualizar prototipo
-                print(f"Actualizando prototipo {id_prototipo}...")
-                cursor.execute(
-                    'UPDATE prototipos SET nombre = ?, responsable = ?, notas = ?, estado = ? WHERE id_prototipo = ?',
-                    (nombre, responsable, notas, estado, id_prototipo)
-                )
-                print("Prototipo actualizado en la base de datos")
-
-                # Eliminar etapas existentes
-                print(f"Eliminando etapas existentes para el prototipo {id_prototipo}")
-                cursor.execute('DELETE FROM etapas_prototipos WHERE id_prototipo = ?', (id_prototipo,))
-                print("Etapas existentes eliminadas")
-
-                # Insertar nuevas etapas
-                for etapa in etapas:
-                    print(f"Insertando etapa: {etapa}")
-                    cursor.execute(
-                        '''
-                        INSERT INTO etapas_prototipos (id_prototipo, id_proceso, id_producto, cantidad_requerida, tiempo, nombre_proceso, nombre_producto)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                        ''',
-                        (id_prototipo, etapa['id_proceso'], etapa['id_producto'], etapa['cantidad_requerida'],
-                         etapa['tiempo'], etapa['nombre_proceso'], etapa['nombre_producto'])
-                    )
-
-                # Insertar en historial de estados (si el estado cambió)
-                if estado_anterior != estado:
-                    print("Insertando en historial de estados...")
-                    cursor.execute(
-                        '''
-                        INSERT INTO historial_estados_prototipos (id_prototipo, estado_anterior, estado_nuevo, fecha_cambio, usuario_cambio)
-                        VALUES (?, ?, ?, ?, ?)
-                        ''',
-                        (id_prototipo, estado_anterior, estado, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), current_user['nombre'])
-                    )
-                    print("Historial de estados actualizado")
-
-                # Confirmar la transacción
-                conn.commit()
-                print(f"Prototipo {id_prototipo} actualizado con éxito")
-
-                return jsonify({'message': 'Prototipo actualizado correctamente'}), 200
-
-        except Exception as e:
-            if conn:
-                conn.rollback()
-                print("Transacción revertida debido a un error")
-            print(f"Error al manejar prototipo: {type(e).__name__} - {str(e)}")
-            return jsonify({'error': f"Error: {str(e)}"}), 500
-        finally:
-            if conn:
-                conn.close()
-                print("Conexión a la base de datos cerrada")
-
-    return protected_get_prototipo(id_prototipo)
+    except Exception as e:
+        conn.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
 
 # Rutas para manejar tipos de producto
-@app.route('/api/tipos_producto', methods=['GET'])
+@app.route('/api/tipos_producto', methods=['GET', 'POST', 'OPTIONS'])
 @token_required
-def get_tipos_producto(current_user):
+def handle_tipos_producto(current_user):
+    conn = get_db_connection()
+    cursor = conn.cursor()
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute('SELECT id_tipo, nombre FROM tipos_producto')
-        tipos = cursor.fetchall()
-        return jsonify([{'id_tipo': row['id_tipo'], 'nombre': row['nombre']} for row in tipos])
-    except Exception as e:
-        print(f"Error al cargar tipos de producto: {e}")
-        return jsonify({'error': str(e)}), 500
-    finally:
-        if 'conn' in locals():
-            conn.close()
+        if request.method == 'GET':
+            cursor.execute('SELECT id_tipo, nombre FROM tipos_producto')
+            tipos = cursor.fetchall()
+            return jsonify([{'id_tipo': row['id_tipo'], 'nombre': row['nombre']} for row in tipos]), 200
 
-@app.route('/api/tipos_producto', methods=['POST'])
-@token_required
-def add_tipo_producto(current_user):
-    data = request.get_json()
-    nombre = data.get('nombre')
-    if not nombre:
-        return jsonify({'error': 'Nombre es requerido'}), 400
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute('INSERT INTO tipos_producto (nombre) VALUES (?)', (nombre,))
-        conn.commit()
-        return jsonify({'message': 'Tipo de producto agregado'})
+        elif request.method == 'POST':
+            data = request.get_json()
+            nombre = data.get('nombre')
+            if not nombre:
+                return jsonify({'error': 'Nombre es requerido'}), 400
+            cursor.execute('INSERT INTO tipos_producto (nombre) VALUES (?)', (nombre,))
+            conn.commit()
+            return jsonify({'message': 'Tipo de producto agregado'}), 201
+
     except Exception as e:
-        print(f"Error al agregar tipo de producto: {e}")
+        conn.rollback()
         return jsonify({'error': str(e)}), 500
     finally:
-        if 'conn' in locals():
-            conn.close()
+        conn.close()
 
 # Rutas para verificar productos
-@app.route('/api/verificar', methods=['POST'])
+@app.route('/api/verificar', methods=['POST', 'OPTIONS'])
 @token_required
 def verificar_producto(current_user):
+    if request.method == 'OPTIONS':
+        return '', 200
+
     data = request.get_json()
     id_producto = data.get('id_producto')
     estado_verificacion = data.get('estado_verificacion')
@@ -1076,9 +938,9 @@ def verificar_producto(current_user):
     if not id_producto or not estado_verificacion:
         return jsonify({'error': 'ID de producto y estado son requeridos'}), 400
 
+    conn = get_db_connection()
+    cursor = conn.cursor()
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
         cursor.execute("SELECT nombre FROM productos WHERE id_producto = ?", (id_producto,))
         producto = cursor.fetchone()
         if not producto:
@@ -1089,7 +951,6 @@ def verificar_producto(current_user):
             SET estado_verificacion = ?, fecha_actualizacion = CURRENT_TIMESTAMP
             WHERE id_producto = ?
         """, (estado_verificacion, id_producto))
-        conn.commit()
         if cursor.rowcount == 0:
             return jsonify({'error': 'Producto no encontrado'}), 404
         
@@ -1109,377 +970,379 @@ def verificar_producto(current_user):
         return jsonify({
             'message': 'Producto verificado correctamente',
             'producto': producto['nombre']
-        })
+        }), 200
+
     except Exception as e:
-        print(f"Error al verificar producto: {e}")
+        conn.rollback()
         return jsonify({'error': str(e)}), 500
     finally:
-        if 'conn' in locals():
-            conn.close()
+        conn.close()
 
-# Rutas para reportes
-@app.route('/api/reportes', methods=['GET', 'OPTIONS'])
-def get_reportes():
-    if request.method == 'OPTIONS':
-        return '', 200
+# Rutas para reportes (corregidas)
+@app.route('/api/reportes', methods=['GET'])
+@token_required
+def get_reportes(current_user):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        # Filtro de fechas
+        start_date = request.args.get('startDate')
+        end_date = request.args.get('endDate')
+        date_filter = ""
+        date_params = []
+        if start_date and end_date:
+            try:
+                datetime.strptime(start_date, '%Y-%m-%d')
+                datetime.strptime(end_date, '%Y-%m-%d')
+                date_filter = "WHERE fecha_movimiento BETWEEN ? AND ?"
+                date_params = [start_date, end_date]
+            except ValueError:
+                return jsonify({'error': 'Formato de fecha inválido. Use YYYY-MM-DD'}), 400
 
-    @token_required
-    def protected_get_reportes(current_user):
-        try:
-            conn = get_db_connection()
-            cursor = conn.cursor()
+        # Resumen del Inventario
+        query_inventario = '''
+            SELECT * FROM vista_inventario
+            WHERE estado_verificacion = 'Verificado'
+        '''
+        cursor.execute(query_inventario)
+        inventario = cursor.fetchall() or []  # Aseguramos una lista vacía si no hay resultados
 
-            start_date = request.args.get('startDate')
-            end_date = request.args.get('endDate')
-            date_filter = ""
-            date_params = []
-            if start_date and end_date:
-                try:
-                    # Validar formato de fechas (YYYY-MM-DD)
-                    datetime.strptime(start_date, '%Y-%m-%d')
-                    datetime.strptime(end_date, '%Y-%m-%d')
-                    date_filter = "WHERE fecha_movimiento BETWEEN ? AND ?"
-                    date_params = [start_date, end_date]
-                except ValueError:
-                    return jsonify({'error': 'Formato de fecha inválido. Use YYYY-MM-DD'}), 400
+        total_productos = len(inventario)
+        valor_total = 0
+        productos_list = []
+        for item in inventario:
+            try:
+                cantidad = float(item['cantidad'] or 0)
+                precio = float(item['precio'] or 0)
+                valor_total += cantidad * precio
+                productos_list.append({
+                    'nombre': item['producto'] or 'N/A',
+                    'cantidad': cantidad,
+                    'precio': precio,
+                    'stock_minimo': float(item['stock_minimo'] or 0),
+                    'stock_maximo': float(item['stock_maximo'] or 0),
+                    'es_toxico': bool(item['es_toxico']),
+                    'es_corrosivo': bool(item['es_corrosivo']),
+                    'es_inflamable': bool(item['es_inflamable'])
+                })
+            except (ValueError, TypeError):
+                continue
 
-            # Resumen del Inventario
-            query_inventario = '''
-                SELECT * FROM vista_inventario
-                WHERE estado_verificacion = 'Verificado'
-            '''
-            cursor.execute(query_inventario)
-            inventario = cursor.fetchall()
+        productos_bajo_stock = [
+            {
+                'nombre': row['nombre'],
+                'cantidad': row['cantidad'],
+                'stock_minimo': row['stock_minimo']
+            }
+            for row in productos_list if row['cantidad'] < row['stock_minimo']
+        ]
 
-            total_productos = len(inventario)
-            valor_total = 0
-            productos_list = []
-            for item in inventario:
-                try:
-                    cantidad = float(item['cantidad']) if item['cantidad'] is not None else 0
-                    precio = float(item['precio']) if item['precio'] is not None else 0
-                    valor_total += cantidad * precio
-                    productos_list.append({
-                        'nombre': item['producto'],
-                        'cantidad': cantidad,
-                        'precio': precio,
-                        'stock_minimo': float(item['stock_minimo']) if item['stock_minimo'] is not None else 0,
-                        'stock_maximo': float(item['stock_maximo']) if item['stock_maximo'] is not None else 0,
-                        'es_toxico': bool(item['es_toxico']),
-                        'es_corrosivo': bool(item['es_corrosivo']),
-                        'es_inflamable': bool(item['es_inflamable'])
-                    })
-                except (ValueError, TypeError) as e:
-                    print(f"Error al procesar producto {item['producto']}: {e}")
-                    continue
+        productos_especiales = [
+            {
+                'nombre': row['nombre'],
+                'toxico': row['es_toxico'],
+                'corrosivo': row['es_corrosivo'],
+                'inflamable': row['es_inflamable']
+            }
+            for row in productos_list if row['es_toxico'] or row['es_corrosivo'] or row['es_inflamable']
+        ]
 
-            productos_bajo_stock = [
-                {
-                    'nombre': row['nombre'],
-                    'cantidad': row['cantidad'],
-                    'stock_minimo': row['stock_minimo']
-                }
-                for row in productos_list if row['cantidad'] < row['stock_minimo']
-            ]
+        # Análisis de Movimientos
+        total_movimientos_query = f'''
+            SELECT COUNT(*) as count
+            FROM movimientos_inventario
+            {date_filter}
+        '''
+        cursor.execute(total_movimientos_query, date_params)
+        row = cursor.fetchone()
+        total_movimientos = row['count'] if row and 'count' in row else 0  # Corrección del manejo de None
 
-            productos_especiales = [
-                {
-                    'nombre': row['nombre'],
-                    'toxico': row['es_toxico'],
-                    'corrosivo': row['es_corrosivo'],
-                    'inflamable': row['es_inflamable']
-                }
-                for row in productos_list if row['es_toxico'] or row['es_corrosivo'] or row['es_inflamable']
-            ]
+        movimientos_por_tipo_query = f'''
+            SELECT tipo_movimiento, COUNT(*) as cantidad
+            FROM movimientos_inventario
+            {date_filter}
+            GROUP BY tipo_movimiento
+        '''
+        cursor.execute(movimientos_por_tipo_query, date_params)
+        movimientos_por_tipo = cursor.fetchall() or []  # Aseguramos una lista vacía si no hay resultados
+        movimientos_por_tipo_list = [
+            {'tipo_movimiento': row['tipo_movimiento'], 'cantidad': row['cantidad']}
+            for row in movimientos_por_tipo
+        ]
 
-            # Análisis de Movimientos
-            total_movimientos_query = f'''
-                SELECT COUNT(*) as count
-                FROM movimientos_inventario
-                {date_filter}
-            '''
-            cursor.execute(total_movimientos_query, date_params)
-            total_movimientos_result = cursor.fetchone()
-            total_movimientos = total_movimientos_result['count'] if total_movimientos_result else 0
+        ultimos_movimientos_query = f'''
+            SELECT m.id_producto, m.id_usuario, u.nombre as usuario, m.tipo_movimiento, m.cantidad, m.fecha_movimiento, m.descripcion, p.nombre as nombre_producto
+            FROM movimientos_inventario m
+            LEFT JOIN productos p ON m.id_producto = p.id_producto
+            LEFT JOIN usuarios u ON m.id_usuario = u.id_usuario
+            {date_filter}
+            ORDER BY m.fecha_movimiento DESC
+            LIMIT 10
+        '''
+        cursor.execute(ultimos_movimientos_query, date_params)
+        ultimos_movimientos = cursor.fetchall() or []  # Aseguramos una lista vacía si no hay resultados
+        ultimos_movimientos_list = [
+            {
+                'id_producto': row['id_producto'],
+                'nombre_producto': row['nombre_producto'] if row['nombre_producto'] else 'N/A',
+                'usuario': row['usuario'] if row['usuario'] else 'N/A',
+                'tipo_movimiento': row['tipo_movimiento'],
+                'cantidad': float(row['cantidad'] or 0),
+                'fecha_movimiento': row['fecha_movimiento'],
+                'descripcion': row['descripcion'] if row['descripcion'] else 'N/A'
+            }
+            for row in ultimos_movimientos
+        ]
 
-            movimientos_por_tipo_query = f'''
-                SELECT tipo_movimiento, COUNT(*) as cantidad
-                FROM movimientos_inventario
-                {date_filter}
-                GROUP BY tipo_movimiento
-            '''
-            cursor.execute(movimientos_por_tipo_query, date_params)
-            movimientos_por_tipo = cursor.fetchall()
-            movimientos_por_tipo_list = [
-                {'tipo_movimiento': row['tipo_movimiento'], 'cantidad': row['cantidad']}
-                for row in movimientos_por_tipo
-            ]
+        # Estadísticas Adicionales
+        cursor.execute('''
+            SELECT pr.nombre, COUNT(p.id_producto) as total_productos
+            FROM proveedores pr
+            LEFT JOIN productos p ON pr.id_proveedor = p.id_proveedor
+            GROUP BY pr.id_proveedor, pr.nombre
+            ORDER BY total_productos DESC
+            LIMIT 5
+        ''')
+        proveedores_mas_productos = cursor.fetchall() or []  # Aseguramos una lista vacía si no hay resultados
+        proveedores_mas_productos_list = [
+            {'nombre': row['nombre'], 'total_productos': row['total_productos']}
+            for row in proveedores_mas_productos
+        ]
 
-            ultimos_movimientos_query = f'''
-                SELECT m.id_producto, m.id_usuario, u.nombre as usuario, m.tipo_movimiento, m.cantidad, m.fecha_movimiento, m.descripcion, p.nombre as nombre_producto
-                FROM movimientos_inventario m
-                LEFT JOIN productos p ON m.id_producto = p.id_producto
-                LEFT JOIN usuarios u ON m.id_usuario = u.id_usuario
-                {date_filter}
-                ORDER BY m.fecha_movimiento DESC
-                LIMIT 10
-            '''
-            cursor.execute(ultimos_movimientos_query, date_params)
-            ultimos_movimientos = cursor.fetchall()
-            ultimos_movimientos_list = [
-                {
-                    'id_producto': row['id_producto'],
-                    'nombre_producto': row['nombre_producto'],
-                    'usuario': row['usuario'] if row['usuario'] else 'N/A',
-                    'tipo_movimiento': row['tipo_movimiento'],
-                    'cantidad': float(row['cantidad']) if row['cantidad'] is not None else 0,
-                    'fecha_movimiento': row['fecha_movimiento'],
-                    'descripcion': row['descripcion'] if row['descripcion'] else 'N/A'
-                }
-                for row in ultimos_movimientos
-            ]
+        cursor.execute('''
+            SELECT t.nombre, COUNT(p.id_producto) as total_productos
+            FROM tipos_producto t
+            LEFT JOIN productos p ON t.id_tipo = p.id_tipo
+            GROUP BY t.id_tipo, t.nombre
+            ORDER BY total_productos DESC
+            LIMIT 5
+        ''')
+        tipos_mas_comunes = cursor.fetchall() or []  # Aseguramos una lista vacía si no hay resultados
+        tipos_mas_comunes_list = [
+            {'nombre': row['nombre'], 'total_productos': row['total_productos']}
+            for row in tipos_mas_comunes
+        ]
 
-            # Estadísticas Adicionales
-            cursor.execute('''
-                SELECT pr.nombre, COUNT(p.id_producto) as total_productos
-                FROM proveedores pr
-                LEFT JOIN productos p ON pr.id_proveedor = p.id_proveedor
-                GROUP BY pr.id_proveedor, pr.nombre
-                ORDER BY total_productos DESC
-                LIMIT 5
-            ''')
-            proveedores_mas_productos = cursor.fetchall()
-            proveedores_mas_productos_list = [
-                {'nombre': row['nombre'], 'total_productos': row['total_productos']}
-                for row in proveedores_mas_productos
-            ]
+        cursor.execute('''
+            SELECT p.nombre, COUNT(m.id_movimiento) as total_salidas
+            FROM productos p
+            LEFT JOIN movimientos_inventario m ON p.id_producto = m.id_producto
+            WHERE m.tipo_movimiento = 'Salida'
+            GROUP BY p.id_producto, p.nombre
+            ORDER BY total_salidas DESC
+            LIMIT 5
+        ''')
+        productos_mayor_rotacion = cursor.fetchall() or []  # Aseguramos una lista vacía si no hay resultados
+        productos_mayor_rotacion_list = [
+            {'nombre': row['nombre'], 'total_salidas': row['total_salidas']}
+            for row in productos_mayor_rotacion
+        ]
 
-            cursor.execute('''
-                SELECT t.nombre, COUNT(p.id_producto) as total_productos
-                FROM tipos_producto t
-                LEFT JOIN productos p ON t.id_tipo = p.id_tipo
-                GROUP BY t.id_tipo, t.nombre
-                ORDER BY total_productos DESC
-                LIMIT 5
-            ''')
-            tipos_mas_comunes = cursor.fetchall()
-            tipos_mas_comunes_list = [
-                {'nombre': row['nombre'], 'total_productos': row['total_productos']}
-                for row in tipos_mas_comunes
-            ]
+        # Productos más utilizados (con filtro de fechas)
+        productos_mas_utilizados_query = '''
+            SELECT ep.nombre_producto, SUM(ep.cantidad_requerida) as total_requerido
+            FROM etapas_prototipos ep
+            JOIN prototipos p ON ep.id_prototipo = p.id_prototipo
+        '''
+        params_utilizados = []
+        if start_date and end_date:
+            productos_mas_utilizados_query += " WHERE p.fecha_creacion BETWEEN ? AND ?"
+            params_utilizados = [start_date, end_date]
+        productos_mas_utilizados_query += '''
+            GROUP BY ep.id_producto, ep.nombre_producto
+            ORDER BY total_requerido DESC
+            LIMIT 5
+        '''
+        cursor.execute(productos_mas_utilizados_query, params_utilizados)
+        productos_mas_utilizados = cursor.fetchall() or []  # Aseguramos una lista vacía si no hay resultados
+        productos_mas_utilizados_list = [
+            {'nombre_producto': row['nombre_producto'], 'total_requerido': float(row['total_requerido'] or 0)}
+            for row in productos_mas_utilizados
+        ]
 
-            cursor.execute('''
-                SELECT p.nombre, COUNT(m.id_movimiento) as total_salidas
-                FROM productos p
-                LEFT JOIN movimientos_inventario m ON p.id_producto = m.id_producto
-                WHERE m.tipo_movimiento = 'Salida'
-                GROUP BY p.id_producto, p.nombre
-                ORDER BY total_salidas DESC
-                LIMIT 5
-            ''')
-            productos_mayor_rotacion = cursor.fetchall()
-            productos_mayor_rotacion_list = [
-                {'nombre': row['nombre'], 'total_salidas': row['total_salidas']}
-                for row in productos_mayor_rotacion
-            ]
+        # Gráficos
+        cursor.execute('''
+            SELECT t.nombre, COUNT(p.id_producto) as cantidad
+            FROM tipos_producto t
+            LEFT JOIN productos p ON t.id_tipo = p.id_tipo
+            GROUP BY t.id_tipo, t.nombre
+        ''')
+        distribucion_tipos = cursor.fetchall() or []  # Aseguramos una lista vacía si no hay resultados
+        distribucion_tipos_list = [
+            {'nombre': row['nombre'], 'cantidad': row['cantidad']}
+            for row in distribucion_tipos
+        ]
 
-            # Productos más utilizados (basado en etapas de prototipos)
-            cursor.execute('''
-                SELECT ep.nombre_producto, SUM(ep.cantidad_requerida) as total_requerido
-                FROM etapas_prototipos ep
-                JOIN prototipos p ON ep.id_prototipo = p.id_prototipo
-                GROUP BY ep.id_producto, ep.nombre_producto
-                ORDER BY total_requerido DESC
-                LIMIT 5
-            ''')
-            productos_mas_utilizados = cursor.fetchall()
-            productos_mas_utilizados_list = [
-                {'nombre_producto': row['nombre_producto'], 'total_requerido': float(row['total_requerido'])}
-                for row in productos_mas_utilizados
-            ]
+        movimientos_por_dia_query = f'''
+            SELECT DATE(fecha_movimiento) as dia, COUNT(*) as cantidad
+            FROM movimientos_inventario
+            {date_filter}
+            GROUP BY DATE(fecha_movimiento)
+            ORDER BY dia DESC
+            LIMIT 30
+        '''
+        cursor.execute(movimientos_por_dia_query, date_params)
+        movimientos_por_dia = cursor.fetchall() or []  # Aseguramos una lista vacía si no hay resultados
+        movimientos_por_dia_list = [
+            {'dia': row['dia'], 'cantidad': row['cantidad']}
+            for row in movimientos_por_dia
+        ]
 
-            # Gráficos
-            cursor.execute('''
-                SELECT t.nombre, COUNT(p.id_producto) as cantidad
-                FROM tipos_producto t
-                LEFT JOIN productos p ON t.id_tipo = p.id_tipo
-                GROUP BY t.id_tipo, t.nombre
-            ''')
-            distribucion_tipos = cursor.fetchall()
-            distribucion_tipos_list = [
-                {'nombre': row['nombre'], 'cantidad': row['cantidad']}
-                for row in distribucion_tipos
-            ]
+        return jsonify({
+            'resumen_inventario': {
+                'total_productos': total_productos,
+                'valor_total': float(valor_total),
+                'productos': productos_list,
+                'productos_bajo_stock': productos_bajo_stock,
+                'productos_especiales': productos_especiales
+            },
+            'analisis_movimientos': {
+                'total_movimientos': total_movimientos,
+                'movimientos_por_tipo': movimientos_por_tipo_list,
+                'ultimos_movimientos': ultimos_movimientos_list
+            },
+            'estadisticas_adicionales': {
+                'proveedores_mas_productos': proveedores_mas_productos_list,
+                'tipos_mas_comunes': tipos_mas_comunes_list,
+                'productos_mayor_rotacion': productos_mayor_rotacion_list,
+                'productos_mas_utilizados': productos_mas_utilizados_list
+            },
+            'graficos': {
+                'distribucion_tipos': distribucion_tipos_list,
+                'movimientos_por_dia': movimientos_por_dia_list
+            }
+        }), 200
 
-            movimientos_por_dia_query = f'''
-                SELECT DATE(fecha_movimiento) as dia, COUNT(*) as cantidad
-                FROM movimientos_inventario
-                {date_filter}
-                GROUP BY DATE(fecha_movimiento)
-                ORDER BY dia DESC
-                LIMIT 30
-            '''
-            cursor.execute(movimientos_por_dia_query, date_params)
-            movimientos_por_dia = cursor.fetchall()
-            movimientos_por_dia_list = [
-                {'dia': row['dia'], 'cantidad': row['cantidad']}
-                for row in movimientos_por_dia
-            ]
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
 
-            return jsonify({
-                'resumen_inventario': {
-                    'total_productos': total_productos,
-                    'valor_total': float(valor_total),
-                    'productos': productos_list,  # Añadimos la lista de productos
-                    'productos_bajo_stock': productos_bajo_stock,
-                    'productos_especiales': productos_especiales
-                },
-                'analisis_movimientos': {
-                    'total_movimientos': total_movimientos,
-                    'movimientos_por_tipo': movimientos_por_tipo_list,
-                    'ultimos_movimientos': ultimos_movimientos_list
-                },
-                'estadisticas_adicionales': {
-                    'proveedores_mas_productos': proveedores_mas_productos_list,
-                    'tipos_mas_comunes': tipos_mas_comunes_list,
-                    'productos_mayor_rotacion': productos_mayor_rotacion_list,
-                    'productos_mas_utilizados': productos_mas_utilizados_list  # Añadimos productos más utilizados
-                },
-                'graficos': {
-                    'distribucion_tipos': distribucion_tipos_list,
-                    'movimientos_por_dia': movimientos_por_dia_list
-                }
-            }), 200
+@app.route('/api/reportes/export', methods=['GET'])
+@token_required
+def export_reporte(current_user):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        # Filtro de fechas
+        start_date = request.args.get('startDate')
+        end_date = request.args.get('endDate')
+        date_filter = ""
+        date_params = []
+        if start_date and end_date:
+            try:
+                datetime.strptime(start_date, '%Y-%m-%d')
+                datetime.strptime(end_date, '%Y-%m-%d')
+                date_filter = "WHERE m.fecha_movimiento BETWEEN ? AND ?"
+                date_params = [start_date, end_date]
+            except ValueError:
+                return jsonify({'error': 'Formato de fecha inválido. Use YYYY-MM-DD'}), 400
 
-        except Exception as e:
-            print(f"Error al generar reporte: {str(e)}")
-            return jsonify({'error': str(e)}), 500
+        # Inventario
+        cursor.execute('''
+            SELECT producto, cantidad, precio, stock_minimo, es_toxico, es_corrosivo, es_inflamable
+            FROM vista_inventario
+        ''')
+        inventario = cursor.fetchall() or []  # Aseguramos una lista vacía si no hay resultados
+        productos = [
+            {
+                'Nombre': row['producto'] or 'N/A',
+                'Cantidad': float(row['cantidad'] or 0),
+                'Precio': float(row['precio'] or 0),
+                'Stock Mínimo': float(row['stock_minimo'] or 0),
+                'Es Tóxico': 'Sí' if row['es_toxico'] else 'No',
+                'Es Corrosivo': 'Sí' if row['es_corrosivo'] else 'No',
+                'Es Inflamable': 'Sí' if row['es_inflamable'] else 'No'
+            }
+            for row in inventario
+        ]
 
-        finally:
-            if 'conn' in locals():
-                conn.close()
+        # Movimientos
+        movimientos_query = f'''
+            SELECT p.nombre AS producto, u.nombre AS usuario, m.tipo_movimiento, m.cantidad, m.fecha_movimiento, m.descripcion
+            FROM movimientos_inventario m
+            LEFT JOIN productos p ON m.id_producto = p.id_producto
+            LEFT JOIN usuarios u ON m.id_usuario = u.id_usuario
+            {date_filter}
+            ORDER BY m.fecha_movimiento DESC
+        '''
+        cursor.execute(movimientos_query, date_params)
+        movimientos = cursor.fetchall() or []  # Aseguramos una lista vacía si no hay resultados
+        movimientos_list = [
+            {
+                'Producto': row['producto'] if row['producto'] else 'N/A',
+                'Usuario': row['usuario'] if row['usuario'] else 'N/A',
+                'Tipo Movimiento': row['tipo_movimiento'],
+                'Cantidad': float(row['cantidad'] or 0),
+                'Fecha': row['fecha_movimiento'],
+                'Descripción': row['descripcion'] if row['descripcion'] else 'N/A'
+            }
+            for row in movimientos
+        ]
 
-    return protected_get_reportes()
+        # Productos más utilizados
+        productos_mas_utilizados_query = '''
+            SELECT ep.nombre_producto, SUM(ep.cantidad_requerida) as total_requerido
+            FROM etapas_prototipos ep
+            JOIN prototipos p ON ep.id_prototipo = p.id_prototipo
+        '''
+        params_utilizados = []
+        if start_date and end_date:
+            productos_mas_utilizados_query += " WHERE p.fecha_creacion BETWEEN ? AND ?"
+            params_utilizados = [start_date, end_date]
+        productos_mas_utilizados_query += '''
+            GROUP BY ep.id_producto, ep.nombre_producto
+            ORDER BY total_requerido DESC
+            LIMIT 5
+        '''
+        cursor.execute(productos_mas_utilizados_query, params_utilizados)
+        productos_mas_utilizados = cursor.fetchall() or []  # Aseguramos una lista vacía si no hay resultados
+        productos_mas_utilizados_list = [
+            {
+                'Producto': row['nombre_producto'],
+                'Total Requerido': float(row['total_requerido'] or 0)
+            }
+            for row in productos_mas_utilizados
+        ]
 
-@app.route('/api/reportes/export', methods=['GET', 'OPTIONS'])
-def export_reporte():
-    if request.method == 'OPTIONS':
-        return '', 200
+        # Proveedores con más productos
+        cursor.execute('''
+            SELECT pr.nombre, COUNT(p.id_producto) as total_productos
+            FROM proveedores pr
+            LEFT JOIN productos p ON pr.id_proveedor = p.id_proveedor
+            GROUP BY pr.id_proveedor, pr.nombre
+            ORDER BY total_productos DESC
+            LIMIT 5
+        ''')
+        proveedores_mas_productos = cursor.fetchall() or []  # Aseguramos una lista vacía si no hay resultados
+        proveedores_mas_productos_list = [
+            {
+                'Proveedor': row['nombre'],
+                'Total Productos': row['total_productos']
+            }
+            for row in proveedores_mas_productos
+        ]
 
-    @token_required
-    def protected_export_reporte(current_user):
-        try:
-            conn = get_db_connection()
-            cursor = conn.cursor()
+        # Generar el archivo Excel
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            pd.DataFrame(productos).to_excel(writer, sheet_name='Inventario', index=False)
+            pd.DataFrame(movimientos_list).to_excel(writer, sheet_name='Movimientos', index=False)
+            pd.DataFrame(productos_mas_utilizados_list).to_excel(writer, sheet_name='Productos_Mas_Utilizados', index=False)
+            pd.DataFrame(proveedores_mas_productos_list).to_excel(writer, sheet_name='Proveedores_Mas_Productos', index=False)
 
-            # Inventario
-            cursor.execute('''
-                SELECT producto, cantidad, precio, stock_minimo, es_toxico, es_corrosivo, es_inflamable
-                FROM vista_inventario
-            ''')
-            inventario = cursor.fetchall()
-            productos = [
-                {
-                    'Nombre': row['producto'],
-                    'Cantidad': float(row['cantidad']) if row['cantidad'] is not None else 0,
-                    'Precio': float(row['precio']) if row['precio'] is not None else 0,
-                    'Stock Mínimo': float(row['stock_minimo']) if row['stock_minimo'] is not None else 0,
-                    'Es Tóxico': 'Sí' if row['es_toxico'] else 'No',
-                    'Es Corrosivo': 'Sí' if row['es_corrosivo'] else 'No',
-                    'Es Inflamable': 'Sí' if row['es_inflamable'] else 'No'
-                }
-                for row in inventario
-            ]
+        output.seek(0)
+        return send_file(
+            output,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name='Reporte_Avanzado.xlsx'
+        )
 
-            # Movimientos
-            cursor.execute('''
-                SELECT p.nombre AS producto, u.nombre AS usuario, m.tipo_movimiento, m.cantidad, m.fecha_movimiento, m.descripcion
-                FROM movimientos_inventario m
-                LEFT JOIN productos p ON m.id_producto = p.id_producto
-                LEFT JOIN usuarios u ON m.id_usuario = u.id_usuario
-                ORDER BY m.fecha_movimiento DESC
-            ''')
-            movimientos = cursor.fetchall()
-            movimientos_list = [
-                {
-                    'Producto': row['producto'] if row['producto'] else 'N/A',
-                    'Usuario': row['usuario'] if row['usuario'] else 'N/A',
-                    'Tipo Movimiento': row['tipo_movimiento'],
-                    'Cantidad': float(row['cantidad']) if row['cantidad'] is not None else 0,
-                    'Fecha': row['fecha_movimiento'],
-                    'Descripción': row['descripcion'] if row['descripcion'] else 'N/A'
-                }
-                for row in movimientos
-            ]
-
-            # Productos más utilizados
-            cursor.execute('''
-                SELECT ep.nombre_producto, SUM(ep.cantidad_requerida) as total_requerido
-                FROM etapas_prototipos ep
-                JOIN prototipos p ON ep.id_prototipo = p.id_prototipo
-                GROUP BY ep.id_producto, ep.nombre_producto
-                ORDER BY total_requerido DESC
-                LIMIT 5
-            ''')
-            productos_mas_utilizados = cursor.fetchall()
-            productos_mas_utilizados_list = [
-                {
-                    'Producto': row['nombre_producto'],
-                    'Total Requerido': float(row['total_requerido'])
-                }
-                for row in productos_mas_utilizados
-            ]
-
-            # Proveedores con más productos
-            cursor.execute('''
-                SELECT pr.nombre, COUNT(p.id_producto) as total_productos
-                FROM proveedores pr
-                LEFT JOIN productos p ON pr.id_proveedor = p.id_proveedor
-                GROUP BY pr.id_proveedor, pr.nombre
-                ORDER BY total_productos DESC
-                LIMIT 5
-            ''')
-            proveedores_mas_productos = cursor.fetchall()
-            proveedores_mas_productos_list = [
-                {
-                    'Proveedor': row['nombre'],
-                    'Total Productos': row['total_productos']
-                }
-                for row in proveedores_mas_productos
-            ]
-
-            output = BytesIO()
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                df_productos = pd.DataFrame(productos)
-                df_productos.to_excel(writer, sheet_name='Inventario', index=False)
-
-                df_movimientos = pd.DataFrame(movimientos_list)
-                df_movimientos.to_excel(writer, sheet_name='Movimientos', index=False)
-
-                df_productos_mas_utilizados = pd.DataFrame(productos_mas_utilizados_list)
-                df_productos_mas_utilizados.to_excel(writer, sheet_name='Productos_Mas_Utilizados', index=False)
-
-                df_proveedores_mas_productos = pd.DataFrame(proveedores_mas_productos_list)
-                df_proveedores_mas_productos.to_excel(writer, sheet_name='Proveedores_Mas_Productos', index=False)
-
-            output.seek(0)
-
-            return send_file(
-                output,
-                mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                as_attachment=True,
-                download_name='Reporte_Avanzado.xlsx'
-            )
-
-        except Exception as e:
-            print(f"Error al exportar reporte: {str(e)}")
-            return jsonify({'error': 'Error al exportar reporte'}), 500
-
-        finally:
-            if 'conn' in locals():
-                conn.close()
-
-    return protected_export_reporte()
+    except Exception as e:
+        return jsonify({'error': f'Error al exportar reporte: {str(e)}'}), 500
+    finally:
+        conn.close()
 
 # Rutas para manejar lotes
 @app.route('/api/lotes', methods=['GET', 'POST', 'OPTIONS'])
@@ -1488,12 +1351,10 @@ def handle_lotes(current_user):
     if request.method == 'OPTIONS':
         return '', 200
 
+    conn = get_db_connection()
+    cursor = conn.cursor()
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
         if request.method == 'GET':
-            print("Solicitud GET recibida para /api/lotes")
             cursor.execute('SELECT * FROM lotes ORDER BY id_lote')
             lotes = cursor.fetchall()
             lotes_list = [{
@@ -1501,7 +1362,7 @@ def handle_lotes(current_user):
                 'numero_lote': row['numero_lote'],
                 'estado_actual': row['estado_actual']
             } for row in lotes]
-            return jsonify(lotes_list)
+            return jsonify(lotes_list), 200
 
         elif request.method == 'POST':
             data = request.get_json()
@@ -1521,11 +1382,9 @@ def handle_lotes(current_user):
                     cursor.execute('SELECT id_producto, nombre, cantidad FROM productos WHERE nombre = ?', (producto_nombre,))
                     producto = cursor.fetchone()
                     if not producto:
-                        conn.rollback()
                         return jsonify({'error': f'Producto {producto_nombre} no encontrado'}), 404
-                    if producto['cantidad'] < cantidad:
-                        conn.rollback()
-                        return jsonify({'error': f'No hay suficiente {producto_nombre} en inventario. Disponible: {producto["cantidad"]}, Requerido: {cantidad}'}), 400
+                    if float(producto['cantidad']) < float(cantidad):
+                        return jsonify({'error': f'No hay suficiente {producto_nombre} en inventario.'}), 400
 
             cursor.execute('INSERT INTO lotes (numero_lote, estado_actual) VALUES (?, ?)', 
                           (numero_lote, 'Iniciado'))
@@ -1537,39 +1396,34 @@ def handle_lotes(current_user):
                     VALUES (?, ?, ?, ?, ?, ?)
                 """, (id_lote, etapa['numero_etapa'], etapa['nombre_etapa'], etapa['tiempo_estimado'], 
                       etapa['maquina_utilizada'], 'Pendiente'))
-
                 id_etapa_lote = cursor.lastrowid
                 productos_requeridos = etapa.get('productos_requeridos', {})
                 for producto_nombre, cantidad in productos_requeridos.items():
                     cursor.execute('SELECT id_producto FROM productos WHERE nombre = ?', (producto_nombre,))
                     producto = cursor.fetchone()
-                    if not producto:
-                        conn.rollback()
-                        return jsonify({'error': f'Producto {producto_nombre} no encontrado al insertar en etapas_productos'}), 404
                     cursor.execute("""
                         INSERT INTO etapas_productos (id_etapa_lote, id_producto, nombre_producto, cantidad_requerida)
                         VALUES (?, ?, ?, ?)
                     """, (id_etapa_lote, producto['id_producto'], producto_nombre, cantidad))
 
             conn.commit()
-            print(f"Lote {id_lote} creado con éxito")
             return jsonify({'message': 'Lote creado correctamente', 'id': id_lote}), 201
 
     except Exception as e:
         conn.rollback()
-        print(f"Error al manejar lotes: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
-        if 'conn' in locals():
-            conn.close()
+        conn.close()
 
-@app.route('/api/lotes/<int:id_lote>', methods=['GET', 'PUT'])
+@app.route('/api/lotes/<int:id_lote>', methods=['GET', 'PUT', 'OPTIONS'])
 @token_required
-def get_lote(id_lote, current_user):
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
+def get_lote(current_user, id_lote):
+    if request.method == 'OPTIONS':
+        return '', 200
 
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
         if request.method == 'GET':
             cursor.execute('SELECT * FROM lotes WHERE id_lote = ?', (id_lote,))
             lote = cursor.fetchone()
@@ -1583,7 +1437,7 @@ def get_lote(id_lote, current_user):
             for etapa in etapas:
                 cursor.execute('SELECT nombre_producto, cantidad_requerida FROM etapas_productos WHERE id_etapa_lote = ?', (etapa['id_etapa_lote'],))
                 productos = cursor.fetchall()
-                productos_requeridos = {row['nombre_producto']: row['cantidad_requerida'] for row in productos}
+                productos_requeridos = {row['nombre_producto']: float(row['cantidad_requerida']) for row in productos}
 
                 etapas_list.append({
                     'id_etapa_lote': etapa['id_etapa_lote'],
@@ -1603,7 +1457,7 @@ def get_lote(id_lote, current_user):
                     'estado_actual': lote['estado_actual']
                 },
                 'etapas': etapas_list
-            })
+            }), 200
 
         elif request.method == 'PUT':
             data = request.get_json()
@@ -1622,29 +1476,18 @@ def get_lote(id_lote, current_user):
                 return jsonify({'error': 'El número de lote ya existe'}), 400
 
             for etapa in etapas:
-                print(f"Verificando stock para producto {etapa['id_producto']}")
-                try:
-                    cursor.execute('SELECT cantidad, nombre FROM productos WHERE id_producto = ?', (etapa['id_producto'],))
+                productos_requeridos = etapa.get('productos_requeridos', {})
+                for producto_nombre, cantidad in productos_requeridos.items():
+                    cursor.execute('SELECT nombre, cantidad FROM productos WHERE nombre = ?', (producto_nombre,))
                     producto = cursor.fetchone()
-                    print(f"Resultado de la consulta para id_producto {etapa['id_producto']}: {producto}")
                     if not producto:
-                        print(f"Error: Producto con ID {etapa['id_producto']} no encontrado en la base de datos")
-                        return jsonify({
-                            'error': f"Producto con ID {etapa['id_producto']} no encontrado",
-                            'nombre_enviado': etapa['nombre_producto']
-                        }), 404
+                        return jsonify({'error': f'Producto {producto_nombre} no encontrado'}), 404
                     cantidad_disponible = float(producto['cantidad'])
-                    print(f"Cantidad disponible para {producto['nombre']}: {cantidad_disponible}")
-                    if etapa['cantidad_requerida'] > cantidad_disponible:
-                        print(f"Error: Stock insuficiente para producto {etapa['nombre_producto']} (disponible: {cantidad_disponible}, requerido: {etapa['cantidad_requerida']})")
+                    if float(cantidad) > cantidad_disponible:
                         return jsonify({
-                            'error': f"No hay suficiente stock para el producto {etapa['nombre_producto']}",
-                            'detalle': f"Disponible: {cantidad_disponible}, Requerido: {etapa['cantidad_requerida']}"
+                            'error': f"No hay suficiente stock para el producto {producto_nombre}",
+                            'detalle': f"Disponible: {cantidad_disponible}, Requerido: {cantidad}"
                         }), 400
-
-                except Exception as e:
-                        print(f"Error inesperado al verificar stock: {type(e).__name__} - {str(e)}")
-                        return jsonify({'error': f"Error inesperado: {str(e)}"}), 500
 
             cursor.execute('UPDATE lotes SET numero_lote = ?, estado_actual = ? WHERE id_lote = ?', 
                           (numero_lote, 'Iniciado', id_lote))
@@ -1672,26 +1515,24 @@ def get_lote(id_lote, current_user):
                     """, (id_etapa_lote, producto['id_producto'], producto_nombre, cantidad))
 
             conn.commit()
-            print(f"Lote {id_lote} actualizado con éxito")
             return jsonify({'message': 'Lote actualizado correctamente'}), 200
 
     except Exception as e:
-        if 'conn' in locals():
-            conn.rollback()
-        print(f"Error al manejar lote {id_lote}: {e}")
+        conn.rollback()
         return jsonify({'error': str(e)}), 500
     finally:
-        if 'conn' in locals():
-            conn.close()
+        conn.close()
 
 # Rutas para manejar etapas de lotes
-@app.route('/api/lotes/<int:id_lote>/etapas/<int:id_etapa_lote>', methods=['PUT'])
+@app.route('/api/lotes/<int:id_lote>/etapas/<int:id_etapa_lote>', methods=['PUT', 'OPTIONS'])
 @token_required
-def update_etapa_lote(id_lote, id_etapa_lote, current_user):
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
+def update_etapa_lote(current_user, id_lote, id_etapa_lote):
+    if request.method == 'OPTIONS':
+        return '', 200
 
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
         data = request.get_json()
         estado_etapa = data.get('estado_etapa')
         tiempo_restante = data.get('tiempo_restante')
@@ -1734,190 +1575,163 @@ def update_etapa_lote(id_lote, id_etapa_lote, current_user):
         cursor.execute('UPDATE lotes SET estado_actual = ? WHERE id_lote = ?', (nuevo_estado_lote, id_lote))
 
         conn.commit()
-        return jsonify({'message': 'Etapa actualizada correctamente', 'estado_lote': nuevo_estado_lote})
+        return jsonify({'message': 'Etapa actualizada correctamente', 'estado_lote': nuevo_estado_lote}), 200
 
     except Exception as e:
-        if 'conn' in locals():
-            conn.rollback()
-        print(f"Error al actualizar etapa {id_etapa_lote}: {e}")
+        conn.rollback()
         return jsonify({'error': str(e)}), 500
     finally:
-        if 'conn' in locals():
-            conn.close()
+        conn.close()
 
 # Rutas para manejar unidades
-@app.route('/api/unidades', methods=['GET'])
+@app.route('/api/unidades', methods=['GET', 'POST', 'OPTIONS'])
 @token_required
-def get_unidades(current_user):
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute('SELECT id_unidad, nombre FROM unidades')
-        unidades = cursor.fetchall()
-        return jsonify([{'id_unidad': row['id_unidad'], 'nombre': row['nombre']} for row in unidades])
-    except Exception as e:
-        print(f"Error al cargar unidades: {e}")
-        return jsonify({'error': str(e)}), 500
-    finally:
-        if 'conn' in locals():
-            conn.close()
+def handle_unidades(current_user):
+    if request.method == 'OPTIONS':
+        return '', 200
 
-@app.route('/api/unidades', methods=['POST'])
-@token_required
-def add_unidad(current_user):
-    data = request.get_json()
-    nombre = data.get('nombre')
-    if not nombre:
-        return jsonify({'error': 'Nombre es requerido'}), 400
+    conn = get_db_connection()
+    cursor = conn.cursor()
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute('INSERT INTO unidades (nombre) VALUES (?)', (nombre,))
-        conn.commit()
-        return jsonify({'message': 'Unidad agregada'})
+        if request.method == 'GET':
+            cursor.execute('SELECT id_unidad, nombre FROM unidades')
+            unidades = cursor.fetchall()
+            return jsonify([{'id_unidad': row['id_unidad'], 'nombre': row['nombre']} for row in unidades]), 200
+
+        elif request.method == 'POST':
+            data = request.get_json()
+            nombre = data.get('nombre')
+            if not nombre:
+                return jsonify({'error': 'Nombre es requerido'}), 400
+            cursor.execute('INSERT INTO unidades (nombre) VALUES (?)', (nombre,))
+            conn.commit()
+            return jsonify({'message': 'Unidad agregada'}), 201
+
     except Exception as e:
-        print(f"Error al agregar unidad: {e}")
+        conn.rollback()
         return jsonify({'error': str(e)}), 500
     finally:
-        if 'conn' in locals():
-            conn.close()
+        conn.close()
 
 # Rutas para manejar usuarios
-@app.route('/api/usuarios', methods=['GET'])
+@app.route('/api/usuarios', methods=['GET', 'POST', 'OPTIONS'])
 @token_required
-def get_usuarios(current_user):
-    if current_user['rol'] != 'admin':
-        return jsonify({'error': 'No tienes permiso para acceder a esta ruta'}), 403
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute('SELECT id_usuario, nombre, rol FROM usuarios')
-        usuarios = cursor.fetchall()
-        return jsonify([{
-            'id_usuario': row['id_usuario'],
-            'nombre': row['nombre'],
-            'rol': row['rol']
-        } for row in usuarios])
-    except Exception as e:
-        print(f"Error al cargar usuarios: {e}")
-        return jsonify({'error': str(e)}), 500
-    finally:
-        if 'conn' in locals():
-            conn.close()
+def handle_usuarios(current_user):
+    if request.method == 'OPTIONS':
+        return '', 200
 
-@app.route('/api/usuarios', methods=['POST'])
-@token_required
-def add_usuario(current_user):
     if current_user['rol'] != 'admin':
         return jsonify({'error': 'No tienes permiso para acceder a esta ruta'}), 403
 
-    data = request.get_json()
-    nombre = data.get('nombre')
-    contrasena = data.get('contrasena')
-    rol = data.get('rol', 'usuario')
-
-    if not nombre or not contrasena:
-        return jsonify({'error': 'Nombre y contraseña son requeridos'}), 400
-
+    conn = get_db_connection()
+    cursor = conn.cursor()
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM usuarios WHERE nombre = ?', (nombre,))
-        if cursor.fetchone():
-            return jsonify({'error': 'El nombre de usuario ya existe'}), 400
+        if request.method == 'GET':
+            cursor.execute('SELECT id_usuario, nombre, rol FROM usuarios')
+            usuarios = cursor.fetchall()
+            return jsonify([{
+                'id_usuario': row['id_usuario'],
+                'nombre': row['nombre'],
+                'rol': row['rol']
+            } for row in usuarios]), 200
 
-        cursor.execute('INSERT INTO usuarios (nombre, contrasena, rol) VALUES (?, ?, ?)', 
-                       (nombre, contrasena, rol))
-        conn.commit()
-        return jsonify({'message': 'Usuario creado correctamente'})
+        elif request.method == 'POST':
+            data = request.get_json()
+            nombre = data.get('nombre')
+            contrasena = data.get('contrasena')
+            rol = data.get('rol', 'usuario')
+
+            if not nombre or not contrasena:
+                return jsonify({'error': 'Nombre y contraseña son requeridos'}), 400
+
+            cursor.execute('SELECT * FROM usuarios WHERE nombre = ?', (nombre,))
+            if cursor.fetchone():
+                return jsonify({'error': 'El nombre de usuario ya existe'}), 400
+
+            hashed_password = generate_password_hash(contrasena)
+            cursor.execute('INSERT INTO usuarios (nombre, contrasena, rol) VALUES (?, ?, ?)', 
+                           (nombre, hashed_password, rol))
+            conn.commit()
+            return jsonify({'message': 'Usuario creado correctamente'}), 201
+
     except Exception as e:
-        print(f"Error al crear usuario: {e}")
+        conn.rollback()
         return jsonify({'error': str(e)}), 500
     finally:
-        if 'conn' in locals():
-            conn.close()
+        conn.close()
 
-@app.route('/api/usuarios/<int:id>', methods=['PUT'])
+@app.route('/api/usuarios/<int:id>', methods=['PUT', 'DELETE', 'OPTIONS'])
 @token_required
-def update_usuario(current_user, id):
+def handle_usuario(current_user, id):
+    if request.method == 'OPTIONS':
+        return '', 200
+
     if current_user['rol'] != 'admin':
         return jsonify({'error': 'No tienes permiso para acceder a esta ruta'}), 403
 
-    data = request.get_json()
-    nombre = data.get('nombre')
-    contrasena = data.get('contrasena')
-    rol = data.get('rol')
-
-    if not nombre or not rol:
-        return jsonify({'error': 'Nombre y rol son requeridos'}), 400
-
+    conn = get_db_connection()
+    cursor = conn.cursor()
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM usuarios WHERE id_usuario = ?', (id,))
-        usuario = cursor.fetchone()
-        if not usuario:
-            return jsonify({'error': 'Usuario no encontrado'}), 404
+        if request.method == 'PUT':
+            data = request.get_json()
+            nombre = data.get('nombre')
+            contrasena = data.get('contrasena')
+            rol = data.get('rol')
 
-        cursor.execute('SELECT * FROM usuarios WHERE nombre = ? AND id_usuario != ?', (nombre, id))
-        if cursor.fetchone():
-            return jsonify({'error': 'El nombre de usuario ya existe'}), 400
+            if not nombre or not rol:
+                return jsonify({'error': 'Nombre y rol son requeridos'}), 400
 
-        if contrasena:
-            cursor.execute('UPDATE usuarios SET nombre = ?, contrasena = ?, rol = ? WHERE id_usuario = ?', 
-                           (nombre, contrasena, rol, id))
-        else:
-            cursor.execute('UPDATE usuarios SET nombre = ?, rol = ? WHERE id_usuario = ?', 
-                           (nombre, rol, id))
-        conn.commit()
-        return jsonify({'message': 'Usuario actualizado correctamente'})
+            cursor.execute('SELECT * FROM usuarios WHERE id_usuario = ?', (id,))
+            usuario = cursor.fetchone()
+            if not usuario:
+                return jsonify({'error': 'Usuario no encontrado'}), 404
+
+            cursor.execute('SELECT * FROM usuarios WHERE nombre = ? AND id_usuario != ?', (nombre, id))
+            if cursor.fetchone():
+                return jsonify({'error': 'El nombre de usuario ya existe'}), 400
+
+            if contrasena:
+                hashed_password = generate_password_hash(contrasena)
+                cursor.execute('UPDATE usuarios SET nombre = ?, contrasena = ?, rol = ? WHERE id_usuario = ?', 
+                               (nombre, hashed_password, rol, id))
+            else:
+                cursor.execute('UPDATE usuarios SET nombre = ?, rol = ? WHERE id_usuario = ?', 
+                               (nombre, rol, id))
+            conn.commit()
+            return jsonify({'message': 'Usuario actualizado correctamente'}), 200
+
+        elif request.method == 'DELETE':
+            cursor.execute('SELECT * FROM usuarios WHERE id_usuario = ?', (id,))
+            usuario = cursor.fetchone()
+            if not usuario:
+                return jsonify({'error': 'Usuario no encontrado'}), 404
+
+            if usuario['id_usuario'] == current_user['id']:
+                return jsonify({'error': 'No puedes eliminar tu propio usuario'}), 400
+
+            cursor.execute('DELETE FROM usuarios WHERE id_usuario = ?', (id,))
+            conn.commit()
+            return jsonify({'message': 'Usuario eliminado correctamente'}), 200
+
     except Exception as e:
-        print(f"Error al actualizar usuario: {e}")
+        conn.rollback()
         return jsonify({'error': str(e)}), 500
     finally:
-        if 'conn' in locals():
-            conn.close()
-
-@app.route('/api/usuarios/<int:id>', methods=['DELETE'])
-@token_required
-def delete_usuario(current_user, id):
-    if current_user['rol'] != 'admin':
-        return jsonify({'error': 'No tienes permiso para acceder a esta ruta'}), 403
-
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM usuarios WHERE id_usuario = ?', (id,))
-        usuario = cursor.fetchone()
-        if not usuario:
-            return jsonify({'error': 'Usuario no encontrado'}), 404
-
-        if usuario['id_usuario'] == current_user['id']:
-            return jsonify({'error': 'No puedes eliminar tu propio usuario'}), 400
-
-        cursor.execute('DELETE FROM usuarios WHERE id_usuario = ?', (id,))
-        conn.commit()
-        return jsonify({'message': 'Usuario eliminado correctamente'})
-    except Exception as e:
-        print(f"Error al eliminar usuario: {e}")
-        return jsonify({'error': str(e)}), 500
-    finally:
-        if 'conn' in locals():
-            conn.close()
+        conn.close()
 
 # Ruta para manejar el dashboard
-@app.route('/api/dashboard', methods=['GET'])
+@app.route('/api/dashboard', methods=['GET', 'OPTIONS'])
 @token_required
 def get_dashboard(current_user):
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
+    if request.method == 'OPTIONS':
+        return '', 200
 
-        # Total de productos
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
         cursor.execute('SELECT COUNT(*) as total FROM productos WHERE estado_verificacion = "Verificado"')
         total_productos = cursor.fetchone()['total']
 
-        # Productos bajo stock
         cursor.execute('''
             SELECT COUNT(*) as bajo_stock
             FROM productos
@@ -1925,7 +1739,6 @@ def get_dashboard(current_user):
         ''')
         productos_bajo_stock = cursor.fetchone()['bajo_stock']
 
-        # Total de movimientos (últimos 30 días)
         cursor.execute('''
             SELECT COUNT(*) as total
             FROM movimientos_inventario
@@ -1933,11 +1746,9 @@ def get_dashboard(current_user):
         ''', (datetime.now() - timedelta(days=30),))
         total_movimientos = cursor.fetchone()['total']
 
-        # Total de prototipos
         cursor.execute('SELECT COUNT(*) as total FROM prototipos WHERE id_usuario = ?', (current_user['id'],))
         total_prototipos = cursor.fetchone()['total']
 
-        # Prototipos por estado
         cursor.execute('''
             SELECT estado, COUNT(*) as cantidad
             FROM prototipos
@@ -1956,15 +1767,13 @@ def get_dashboard(current_user):
             'total_movimientos': total_movimientos,
             'total_prototipos': total_prototipos,
             'prototipos_por_estado': prototipos_por_estado_list
-        })
+        }), 200
+
     except Exception as e:
-        print(f"Error al cargar datos del dashboard: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
-        if 'conn' in locals():
-            conn.close()
+        conn.close()
 
-# Iniciar el servidor Flask (esto no se ejecutará cuando PyWebView lo inicie)
+# Iniciar el servidor Flask
 if __name__ == '__main__':
     app.run(debug=True)
-               

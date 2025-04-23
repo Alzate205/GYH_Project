@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Prototipos - Sistema de Inventario</title>
+    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <div class="logo">GYH</div>
+            <div class="menu-toggle"><i class="fas fa-bars"></i></div>
+            <div class="user-profile">
+                <span id="loggedInUser"></span>
+                <a href="#" class="logout" id="logoutBtn">Cerrar sesión</a>
+            </div>
+        </header>
+
+        <nav class="nav">
+            <ul>
+                <li><a href="dashboard.html" id="dashboardLink">Inventario</a></li>
+                <li><a href="prototipos.html" id="prototypeLink" class="active">Prototipos</a></li>
+                <li><a href="reportes.html" id="reportLink">Reportes</a></li>
+                <li><a href="proveedores.html" id="proveedoresLink">Proveedores</a></li>
+            </ul>
+        </nav>
+
+        <main class="content">
+            <nav class="breadcrumbs">
+                <a href="prototipos.html">Prototipos</a> 
+                <span>></span> 
+                <span id="currentSection">Lista de Prototipos</span>
+            </nav>
+
+            <div id="loading" class="loading-spinner">Cargando...</div>
+            <section id="prototipos-section">
+                <div class="section-header">
+                    <h2>Lista de Prototipos</h2>
+                    <div class="section-controls">
+                        <div class="search-bar">
+                            <input type="text" id="searchPrototipo" placeholder="Buscar por nombre...">
+                            <i class="fas fa-search"></i>
+                        </div>
+                        <button id="addPrototipoBtn" class="action-btn add-btn">
+                            <i class="fas fa-plus"></i> Crear Nuevo Prototipo
+                        </button>
+                    </div>
+                </div>
+                <div id="prototipos-grid" class="prototipos-grid"></div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Modal para Prototipos -->
+    <div id="prototipoModalOverlay" class="modal-overlay">
+        <div class="modal">
+            <h2 id="prototipoModalTitle">Crear Nuevo Prototipo</h2>
+            <form id="prototipoForm">
+                <div class="form-group">
+                    <label for="prototipoNombre">Nombre:</label>
+                    <input type="text" id="prototipoNombre" required>
+                </div>
+                <div class="form-group">
+                    <label for="prototipoResponsable">Responsable:</label>
+                    <input type="text" id="prototipoResponsable" required>
+                </div>
+                <div class="form-group">
+                    <label for="prototipoEstado">Estado:</label>
+                    <select id="prototipoEstado" required>
+                        <option value="En espera">En espera</option>
+                        <option value="En desarrollo">En desarrollo</option>
+                        <option value="En prueba">En prueba</option>
+                        <option value="Finalizado">Finalizado</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Materiales Requeridos:</label>
+                    <div id="materialesList">
+                        <!-- Materiales se agregarán dinámicamente -->
+                    </div>
+                    <button type="button" id="addMaterialBtn" class="btn btn-secondary">Agregar Material</button>
+                </div>
+                <div class="modal-buttons">
+                    <button type="submit" id="savePrototipoBtn" class="btn btn-primary">Guardar</button>
+                    <button type="button" id="closePrototipoModalBtn" class="btn btn-secondary">Cerrar</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Modal para Etapas -->
+    <div id="etapasModalOverlay" class="modal-overlay">
+        <div class="modal">
+            <h2 id="etapasModalTitle">Gestionar Etapas</h2>
+            <div id="etapasList">
+                <!-- Etapas se cargarán dinámicamente -->
+            </div>
+            <button type="button" id="addEtapaBtn" class="btn btn-secondary">Agregar Etapa</button>
+            <div class="modal-buttons">
+                <button type="button" id="closeEtapasModalBtn" class="btn btn-secondary">Cerrar</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="script.js" defer></script>
+</body>
+</html>

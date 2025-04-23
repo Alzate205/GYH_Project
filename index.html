@@ -14,7 +14,7 @@
                 <h1>GYH</h1>
             </div>
             <h2>DENIM TEX SAS</h2>
-            <form id="loginForm">
+            <form id="loginForm" method="POST" action="/api/login">
                 <div class="form-group">
                     <label for="username">Usuario</label>
                     <input type="text" id="username" name="username" placeholder="Ingresa tu usuario" required>
@@ -26,47 +26,27 @@
                 <button type="submit" id="loginBtn">Iniciar sesión</button>
             </form>
             <div class="forgot-password">
-                <a href="#" id="forgotPasswordLink">¿Olvidaste tu contraseña?</a>
+                <a href="#" id="forgotPasswordLink" style="color: #007bff; text-decoration: none;">¿Olvidaste tu contraseña?</a>
             </div>
         </div>
     </div>
 
-    <!-- Modal para cambio de contraseña -->
-    <div id="passwordModal" class="modal" style="display: none;">
+    <!-- Modal para olvidar contraseña -->
+    <div id="forgotPasswordModal" class="modal" style="display: none;">
         <div class="modal-content">
-            <h3>Cambiar contraseña</h3>
-            <form id="passwordForm">
+            <span class="close" id="closeModal">×</span>
+            <h2>Restablecer Contraseña</h2>
+            <form id="forgotPasswordForm">
                 <div class="form-group">
-                    <label for="usernameModal">Usuario</label>
-                    <input type="text" id="usernameModal" name="usernameModal" placeholder="Ingresa tu usuario" required>
+                    <label for="forgotUsername">Usuario</label>
+                    <input type="text" id="forgotUsername" name="forgotUsername" placeholder="Ingresa tu usuario" required>
                 </div>
-                <div class="form-group">
-                    <label for="oldPassword">Contraseña anterior</label>
-                    <input type="password" id="oldPassword" name="oldPassword" placeholder="Introduce tu contraseña anterior" required>
-                </div>
-                <div class="form-group">
-                    <label for="newPassword">Nueva contraseña</label>
-                    <input type="password" id="newPassword" name="newPassword" placeholder="Introduce tu nueva contraseña" required>
-                    <ul class="password-requirements">
-                        <li id="lengthCheck">Entre 9-15 caracteres</li>
-                        <li id="numberCheck">Al menos un número</li>
-                        <li id="uppercaseCheck">Al menos una letra mayúscula</li>
-                        <li id="specialCharCheck">Al menos un carácter especial</li>
-                    </ul>
-                </div>
-                <div class="form-group">
-                    <label for="confirmPassword">Confirmar contraseña</label>
-                    <input type="password" id="confirmPassword" name="confirmPassword" placeholder="Introduce tu nueva contraseña" required>
-                </div>
-                <div class="modal-buttons">
-                    <button type="submit" class="submit-btn">Cambiar contraseña</button>
-                    <button type="button" id="closePasswordModalBtn" class="cancel-btn">Cerrar</button>
-                </div>
+                <button type="submit" id="resetPasswordBtn">Solicitar nueva contraseña</button>
             </form>
+            <p id="resetMessage" style="display: none; margin-top: 10px;"></p>
         </div>
     </div>
 
     <script src="script.js"></script>
-    <script src="script.js?v=1.0"></script>
 </body>
 </html>
