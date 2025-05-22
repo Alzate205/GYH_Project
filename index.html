@@ -14,17 +14,20 @@
                 <h1>GYH</h1>
             </div>
             <h2>DENIM TEX SAS</h2>
-            <form id="loginForm" method="POST" action="/api/login">
-                <div class="form-group">
-                    <label for="username">Usuario</label>
-                    <input type="text" id="username" name="username" placeholder="Ingresa tu usuario" required>
-                </div>
-                <div class="form-group">
-                    <label for="password">Contraseña</label>
-                    <input type="password" id="password" name="password" placeholder="Ingresa tu contraseña" required>
-                </div>
-                <button type="submit" id="loginBtn">Iniciar sesión</button>
-            </form>
+            <div class="login-container">
+                <h2>Iniciar Sesión</h2>
+                <form id="loginForm">
+                    <div class="form-group">
+                        <label for="username">Usuario:</label>
+                        <input type="text" id="username" name="username" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="password">Contraseña:</label>
+                        <input type="password" id="password" name="password" required>
+                    </div>
+                    <button type="submit">Iniciar Sesión</button>
+                </form>
+            </div>
             <div class="forgot-password">
                 <a href="#" id="forgotPasswordLink" style="color: #007bff; text-decoration: none;">¿Olvidaste tu contraseña?</a>
             </div>
@@ -38,8 +41,8 @@
             <h2>Restablecer Contraseña</h2>
             <form id="forgotPasswordForm">
                 <div class="form-group">
-                    <label for="forgotUsername">Usuario</label>
-                    <input type="text" id="forgotUsername" name="forgotUsername" placeholder="Ingresa tu usuario" required>
+                    <label for="forgotEmail">Correo Electrónico</label>
+                    <input type="email" id="forgotEmail" name="forgotEmail" placeholder="Ingresa tu correo electrónico" required>
                 </div>
                 <button type="submit" id="resetPasswordBtn">Solicitar nueva contraseña</button>
             </form>

@@ -21,7 +21,6 @@
         <nav class="nav">
             <ul>
                 <li><a href="dashboard.html" id="dashboardLink" class="active">Inventario</a></li>
-                <li><a href="prototipos.html" id="prototypeLink">Prototipos</a></li>
                 <li><a href="reportes.html" id="reportLink">Reportes</a></li>
                 <li><a href="proveedores.html" id="proveedoresLink">Proveedores</a></li>
             </ul>
@@ -47,6 +46,7 @@
                     <button id="addTipoBtn" class="nav-btn">Agregar Tipo</button>
                     <button id="filterBtn" class="nav-btn"><i class="fas fa-filter"></i> Filtrar</button>
                     <button id="addProductBtn" class="add-btn">Agregar Producto</button>
+                    <button id="exportExcelBtn" class="nav-btn">Exportar a Excel</button>
                 </div>
             </div>
             <div id="inventory-table" class="inventory-grid"></div>
@@ -71,7 +71,7 @@
     </div>
 
     <!-- Modal para Agregar Productos -->
-    <div id="modalOverlay" class="modal-overlay">
+    <div id="modalOverlay" class="modal-overlay" style="display: none;">
         <div class="modal">
             <h2 id="modalTitle">Agregar Producto</h2>
             <form id="productForm">
@@ -113,22 +113,22 @@
                 <!-- Checklist para propiedades -->
                 <label>Propiedades del Producto:</label>
                 <div class="form-group">
-                    <input type="checkbox" id="isToxic" name="properties">
-                    <label for="isToxic">Tóxico</label>
-                    <input type="checkbox" id="isCorrosive" name="properties">
-                    <label for="isCorrosive">Corrosivo</label>
-                    <input type="checkbox" id="isFlammable" name="properties">
-                    <label for="isFlammable">Inflamable</label>
+                    <input type="checkbox" id="productEsToxico" name="properties">
+                    <label for="productEsToxico">Tóxico</label>
+                    <input type="checkbox" id="productEsCorrosivo" name="properties">
+                    <label for="productEsCorrosivo">Corrosivo</label>
+                    <input type="checkbox" id="productEsInflamable" name="properties">
+                    <label for="productEsInflamable">Inflamable</label>
                 </div>
 
                 <button type="submit">Guardar</button>
-                <button type="button" id="closeModalBtn">Cerrar</button>
+                <button type="button" id="closeModalBtn" class="close">Cerrar</button>
             </form>
         </div>
     </div>
 
     <!-- Modal para Editar Productos -->
-    <div id="editProductModalOverlay" class="modal-overlay">
+    <div id="editProductModalOverlay" class="modal-overlay" style="display: none;">
         <div class="modal">
             <h2>Editar Producto</h2>
             <form id="editProductForm">
@@ -183,13 +183,13 @@
                 </div>
 
                 <button type="submit">Guardar Cambios</button>
-                <button type="button" id="closeEditModalBtn">Cerrar</button>
+                <button type="button" id="closeEditModalBtn" class="close">Cerrar</button>
             </form>
         </div>
     </div>
 
     <!-- Modal para Filtros -->
-    <div id="filterModalOverlay" class="modal-overlay">
+    <div id="filterModalOverlay" class="modal-overlay" style="display: none;">
         <div class="modal">
             <h2>Filtrar Productos</h2>
             <form id="filterForm">
@@ -200,13 +200,13 @@
                     </select>
                 </div>
                 <button type="submit" id="applyFilterBtn">Aplicar</button>
-                <button type="button" id="closeFilterModalBtn">Cerrar</button>
+                <button type="button" id="closeFilterModalBtn" class="close">Cerrar</button>
             </form>
         </div>
     </div>
 
     <!-- Modal para Proveedores -->
-    <div id="proveedorModalOverlay" class="modal-overlay">
+    <div id="proveedorModalOverlay" class="modal-overlay" style="display: none;">
         <div class="modal">
             <h2 id="proveedorModalTitle">Agregar Proveedor</h2>
             <form id="proveedorForm">
@@ -227,13 +227,13 @@
                     <input type="email" id="proveedorEmail" required>
                 </div>
                 <button type="submit" id="saveProveedorBtn">Guardar</button>
-                <button type="button" id="closeProveedorModalBtn">Cerrar</button>
+                <button type="button" id="closeProveedorModalBtn" class="close">Cerrar</button>
             </form>
         </div>
     </div>
 
     <!-- Modal para Agregar Tipo -->
-    <div id="tipoModalOverlay" class="modal-overlay">
+    <div id="tipoModalOverlay" class="modal-overlay" style="display: none;">
         <div class="modal">
             <h2 id="tipoModalTitle">Agregar Tipo de Producto</h2>
             <form id="tipoForm">
@@ -242,7 +242,7 @@
                     <input type="text" id="tipoNombre" required>
                 </div>
                 <button type="submit">Guardar</button>
-                <button type="button" id="closeTipoModalBtn">Cerrar</button>
+                <button type="button" id="closeTipoModalBtn" class="close">Cerrar</button>
             </form>
         </div>
     </div>

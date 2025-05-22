@@ -1,3 +1,6 @@
+// Definición de la URL base para las peticiones API
+const BASE_URL = '';  // URL base vacía para peticiones relativas al servidor actual
+
 let currentUser = null;
 let currentFilter = '';
 let searchTerm = '';
@@ -15,10 +18,68 @@ let reportOutput = null;
 let tipoModalOverlay = null;
 let lotesTable = null;
 let loteModalOverlay = null;
-let prototypesTable = null;
+let prototypesGrid = null;
 let prototypeModalOverlay = null;
-const BASE_URL = 'http://127.0.0.1:5000';
 let timers = {};
+
+// Mapeo de nombres de usuario a emails
+const userEmails = {
+    'Ana Gómez': 'ana@tintoreria.com',
+    'Luis Martínez': 'luis@tintoreria.com',
+    'Carlos Rodríguez': 'carlos@tintoreria.com'
+};
+
+// Función para manejar el login
+async function handleLogin(event) {
+    event.preventDefault();
+    
+    const username = document.getElementById('username').value;
+    const password = document.getElementById('password').value;
+    
+    // Obtener el email correspondiente al nombre de usuario
+    const email = userEmails[username];
+    
+    if (!email) {
+        alert('Usuario no encontrado');
+        return;
+    }
+    
+    try {
+        const response = await fetch(`${BASE_URL}/api/login`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                username: email,
+                password: password
+            })
+        });
+        
+        if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.error || 'Error al iniciar sesión');
+        }
+        
+        const data = await response.json();
+        localStorage.setItem('token', data.token);
+        currentUser = data.user;
+        
+        // Redirigir al dashboard
+        window.location.href = 'dashboard.html';
+    } catch (error) {
+        console.error('Error en login:', error);
+        alert(error.message);
+    }
+}
+
+// Inicializar el formulario de login
+document.addEventListener('DOMContentLoaded', () => {
+    const loginForm = document.getElementById('loginForm');
+    if (loginForm) {
+        loginForm.addEventListener('submit', handleLogin);
+    }
+});
 
 function normalizeString(str) {
     return str
@@ -64,10 +125,24 @@ function registerMovement(productId, productName, tipoMovimiento, cantidad, deta
         .then(data => console.log('Movimiento registrado:', data))
         .catch(error => console.error('Error al registrar movimiento:', error.message));
 }
-
 function setupNavLinks() {
-    const dashboardLink = document.getElementById('dashboardLink');
+    // Ocultar Prototipos
     const prototypeLink = document.getElementById('prototypeLink');
+    if (prototypeLink) {
+        prototypeLink.style.display = 'none';
+        prototypeLink.removeEventListener('click', () => {});
+    }
+
+    // Ocultar Procesos
+    const procesosLink = document.getElementById('procesosLink');
+    if (procesosLink) {
+        procesosLink.style.display = 'none';
+        procesosLink.removeEventListener('click', () => {});
+        procesosLink.setAttribute('aria-hidden', 'true'); // Mejor accesibilidad
+    }
+
+    // Resto de la lógica para otros enlaces
+    const dashboardLink = document.getElementById('dashboardLink');
     const reportLink = document.getElementById('reportLink');
     const proveedoresLink = document.getElementById('proveedoresLink');
     const addTipoBtn = document.getElementById('addTipoBtn');
@@ -75,24 +150,25 @@ function setupNavLinks() {
 
     const setActiveLink = (link) => {
         document.querySelectorAll('.nav a').forEach(a => a.classList.remove('active'));
-        link.classList.add('active');
+        if (link) link.classList.add('active');
     };
 
     const userRole = currentUser ? currentUser.rol : null;
 
-    if (userRole === 'Administrador') {
-        // Mostrar todo
-    } else if (userRole === 'Líder') {
-        if (prototypeLink) prototypeLink.style.display = 'none';
-        if (reportLink) reportLink.style.display = 'none';
-        if (filterBtn) filterBtn.style.display = 'block';
-        if (addTipoBtn) addTipoBtn.style.display = 'block';
-    } else if (userRole === 'Bodeguero') {
-        if (prototypeLink) prototypeLink.style.display = 'none';
-        if (reportLink) reportLink.style.display = 'none';
-        if (proveedoresLink) proveedoresLink.style.display = 'none';
-        if (filterBtn) filterBtn.style.display = 'block';
-        if (addTipoBtn) addTipoBtn.style.display = 'none';
+    if (userRole) {
+        if (userRole === 'Administrador') {
+            if (filterBtn) filterBtn.style.display = 'block';
+            if (addTipoBtn) addTipoBtn.style.display = 'block';
+        } else if (userRole === 'Líder') {
+            if (reportLink) reportLink.style.display = 'none';
+            if (filterBtn) filterBtn.style.display = 'block';
+            if (addTipoBtn) addTipoBtn.style.display = 'block';
+        } else if (userRole === 'Bodeguero') {
+            if (reportLink) reportLink.style.display = 'none';
+            if (proveedoresLink) proveedoresLink.style.display = 'none';
+            if (filterBtn) filterBtn.style.display = 'block';
+            if (addTipoBtn) addTipoBtn.style.display = 'none';
+        }
     }
 
     if (dashboardLink) {
@@ -101,18 +177,14 @@ function setupNavLinks() {
             window.location.href = 'dashboard.html';
         });
     }
-    if (prototypeLink && userRole === 'Administrador') {
-        prototypeLink.addEventListener('click', () => {
-            setActiveLink(prototypeLink);
-            window.location.href = 'prototipos.html';
-        });
-    }
+
     if (reportLink && userRole === 'Administrador') {
         reportLink.addEventListener('click', () => {
             setActiveLink(reportLink);
             window.location.href = 'reportes.html';
         });
     }
+
     if (proveedoresLink && (userRole === 'Administrador' || userRole === 'Líder')) {
         proveedoresLink.addEventListener('click', () => {
             setActiveLink(proveedoresLink);
@@ -121,60 +193,120 @@ function setupNavLinks() {
     }
 }
 
-function loadVerifiedProductsIntoSelect(selectElement) {
-    fetch(`${BASE_URL}/api/inventario`, {
-        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+// Asegurar que se ejecute después de cargar el DOM y observar cambios
+document.addEventListener('DOMContentLoaded', () => {
+    const token = localStorage.getItem('token');
+    if (!token) {
+        if (!window.location.pathname.includes('index.html')) {
+            window.location.href = 'index.html';
+        }
+        return;
+    }
+
+    fetch(`${BASE_URL}/api/usuario`, {
+        headers: { 'Authorization': `Bearer ${token}` }
     })
-        .then(response => {
-            if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-            return response.json();
-        })
-        .then(data => {
-            selectElement.innerHTML = '<option value="">Seleccionar producto</option>';
-            const verifiedProducts = data.filter(item => item.estado_verificacion === 'Verificado');
-            if (verifiedProducts.length === 0) {
-                selectElement.innerHTML += '<option value="">No hay productos disponibles</option>';
-                return;
+    .then(response => response.json())
+    .then(data => {
+        currentUser = data;
+        const loggedInUser = document.getElementById('loggedInUser');
+        if (loggedInUser) {
+            loggedInUser.textContent = `Hola, ${currentUser.nombre} (${currentUser.rol})`;
+        }
+        setupNavLinks(); // Llamar inicialmente
+    })
+    .catch(error => {
+        console.error('Error al cargar usuario:', error);
+        localStorage.removeItem('token');
+        window.location.href = 'index.html';
+    });
+
+    // Observador para detectar cambios dinámicos
+    const observer = new MutationObserver(() => {
+        const prototypeLink = document.getElementById('prototypeLink');
+        if (prototypeLink && prototypeLink.style.display !== 'none') {
+            prototypeLink.style.display = 'none';
+            prototypeLink.removeEventListener('click', () => {});
+        }
+        const procesosLink = document.getElementById('procesosLink');
+        if (procesosLink && procesosLink.style.display !== 'none') {
+            procesosLink.style.display = 'none';
+            procesosLink.removeEventListener('click', () => {});
+            procesosLink.setAttribute('aria-hidden', 'true');
+        }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+});
+
+async function loadProcessesIntoSelect(selectElement) {
+    try {
+        const token = localStorage.getItem('token');
+        if (!token) {
+            console.error('No se encontró token de autenticación');
+            return;
+        }
+
+        const response = await fetch(`${BASE_URL}/api/procesos_guardados`, {
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json'
             }
-            verifiedProducts.forEach(product => {
-                if (!product.id || !product.product) {
-                    console.error('Producto inválido:', product);
-                    return;
-                }
-                const option = document.createElement('option');
-                option.value = product.id;
-                option.textContent = `${product.product} (Disponible: ${product.quantity} ${product.unit ? product.unit : ''})`;
-                option.dataset.quantity = product.quantity;
-                selectElement.appendChild(option);
-            });
-        })
-        .catch(error => {
-            console.error('Error al cargar productos verificados:', error);
-            selectElement.innerHTML = '<option value="">Error al cargar productos</option>';
         });
+
+        if (!response.ok) {
+            throw new Error(`Error al cargar procesos: ${response.status}`);
+        }
+
+        const procesos = await response.json();
+        selectElement.innerHTML = '<option value="">Seleccione un proceso</option>';
+        
+        procesos.forEach(proceso => {
+            const option = document.createElement('option');
+            option.value = proceso.id_proceso_guardado;
+            option.textContent = proceso.nombre_proceso;
+            selectElement.appendChild(option);
+        });
+
+    } catch (error) {
+        console.error('Error al cargar procesos:', error);
+        alert('Error al cargar la lista de procesos');
+    }
 }
 
-function loadProcessesIntoSelect(selectElement) {
-    fetch(`${BASE_URL}/api/procesos_guardados`, {
-        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
-    })
-        .then(response => {
-            if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-            return response.json();
-        })
-        .then(data => {
-            selectElement.innerHTML = '<option value="">Seleccionar proceso</option>';
-            data.forEach(process => {
-                const option = document.createElement('option');
-                option.value = process.id_proceso_guardado;
-                option.textContent = process.nombre_proceso;
-                selectElement.appendChild(option);
-            });
-        })
-        .catch(error => {
-            console.error('Error al cargar procesos:', error);
-            selectElement.innerHTML = '<option value="">Error al cargar procesos</option>';
+async function loadVerifiedProductsIntoSelect(selectElement) {
+    try {
+        const token = localStorage.getItem('token');
+        if (!token) {
+            console.error('No se encontró token de autenticación');
+            return;
+        }
+
+        const response = await fetch(`${BASE_URL}/api/inventario?all=false`, {
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json'
+            }
         });
+
+        if (!response.ok) {
+            throw new Error(`Error al cargar productos: ${response.status}`);
+        }
+
+        const productos = await response.json();
+        selectElement.innerHTML = '<option value="">Seleccione un producto</option>';
+        
+        productos.forEach(producto => {
+            const option = document.createElement('option');
+            option.value = producto.id;
+            option.textContent = `${producto.product} (Disponible: ${producto.quantity} ${producto.unit})`;
+            option.dataset.quantity = producto.quantity;
+            selectElement.appendChild(option);
+        });
+
+    } catch (error) {
+        console.error('Error al cargar productos:', error);
+        alert('Error al cargar la lista de productos');
+    }
 }
 
 function addEtapaRow(num, nombre = '', tiempo = '', maquina = '', productos = {}) {
@@ -271,31 +403,181 @@ function addEtapaRow(num, nombre = '', tiempo = '', maquina = '', productos = {}
     etapaRow.dataset.etapaNum = num;
 }
 
-function addStageRow(num, processId = '', productId = '', quantity = '', time = '') {
+function addStageRow(num, processId = '', productId = '', quantity = '', time = '', unit = 'min') {
     const stagesContainer = document.getElementById('stagesContainer');
-    if (!stagesContainer) return;
+    const row = document.createElement('div');
+    row.className = 'stage-item';
+    row.setAttribute('role', 'listitem');
 
-    const stageRow = document.createElement('div');
-    stageRow.className = 'stage-row';
-    stageRow.innerHTML = `
-        <label>Etapa ${num}:</label>
-        <select class="stage-process" required></select>
-        <select class="stage-product" required></select>
-        <input type="number" class="stage-quantity" value="${quantity}" placeholder="Cantidad" step="0.01" min="0" required>
-        <input type="number" class="stage-time" value="${time}" placeholder="Tiempo (min)" min="1" required>
-        <button type="button" class="remove-stage-btn">Eliminar</button>
+    const processSelect = document.createElement('select');
+    processSelect.className = 'stage-process';
+    processSelect.required = true;
+    processSelect.setAttribute('aria-label', `Proceso para etapa ${num}`);
+    loadProcessesIntoSelect(processSelect).then(() => {
+        if (processId) {
+            processSelect.value = processId;
+        }
+    });
+
+    const productSelect = document.createElement('select');
+    productSelect.className = 'stage-product';
+    productSelect.required = true;
+    productSelect.setAttribute('aria-label', `Producto para etapa ${num}`);
+    loadVerifiedProductsIntoSelect(productSelect).then(() => {
+        if (productId) {
+            productSelect.value = productId;
+        }
+    });
+
+    const quantityInput = document.createElement('input');
+    quantityInput.type = 'number';
+    quantityInput.className = 'stage-quantity';
+    quantityInput.min = '0.01';
+    quantityInput.step = '0.01';
+    quantityInput.required = true;
+    quantityInput.value = quantity;
+    quantityInput.setAttribute('aria-label', `Cantidad requerida para etapa ${num}`);
+
+    const timeInput = document.createElement('input');
+    timeInput.type = 'number';
+    timeInput.className = 'stage-time';
+    timeInput.min = '1';
+    timeInput.required = true;
+    timeInput.value = time;
+    timeInput.setAttribute('aria-label', `Tiempo para etapa ${num}`);
+
+    const unitSelect = document.createElement('select');
+    unitSelect.className = 'stage-unit';
+    unitSelect.innerHTML = `
+        <option value="min">Minutos</option>
+        <option value="hr">Horas</option>
+        <option value="day">Días</option>
     `;
-    stagesContainer.appendChild(stageRow);
+    unitSelect.value = unit;
+    unitSelect.setAttribute('aria-label', `Unidad de tiempo para etapa ${num}`);
 
-    const processSelect = stageRow.querySelector('.stage-process');
-    const productSelect = stageRow.querySelector('.stage-product');
-    loadProcessesIntoSelect(processSelect);
-    loadVerifiedProductsIntoSelect(productSelect);
+    const removeButton = document.createElement('button');
+    removeButton.type = 'button';
+    removeButton.className = 'remove-stage-btn';
+    removeButton.innerHTML = '<i class="fas fa-times"></i>';
+    removeButton.setAttribute('aria-label', `Eliminar etapa ${num}`);
+    removeButton.onclick = () => {
+        row.remove();
+        renumberStages();
+    };
 
-    if (processId) processSelect.value = processId;
-    if (productId) productSelect.value = productId;
+    const header = document.createElement('div');
+    header.className = 'stage-header';
+    header.innerHTML = `<span>Etapa ${num}</span>`;
+    header.appendChild(removeButton);
 
-    stageRow.querySelector('.remove-stage-btn').addEventListener('click', () => stageRow.remove());
+    const content = document.createElement('div');
+    content.className = 'stage-content';
+    content.innerHTML = `
+        <div class="form-group">
+            <label>Proceso:</label>
+        </div>
+        <div class="form-group">
+            <label>Producto:</label>
+        </div>
+        <div class="form-group">
+            <label>Cantidad:</label>
+        </div>
+        <div class="form-group">
+            <label>Duración:</label>
+            <div class="duration-group"></div>
+        </div>
+    `;
+
+    content.querySelector('.form-group:nth-child(1)').appendChild(processSelect);
+    content.querySelector('.form-group:nth-child(2)').appendChild(productSelect);
+    content.querySelector('.form-group:nth-child(3)').appendChild(quantityInput);
+    content.querySelector('.duration-group').appendChild(timeInput);
+    content.querySelector('.duration-group').appendChild(unitSelect);
+
+    row.appendChild(header);
+    row.appendChild(content);
+    stagesContainer.appendChild(row);
+
+    // Actualizar el borrador cuando se modifique cualquier campo
+    [processSelect, productSelect, quantityInput, timeInput, unitSelect].forEach(element => {
+        element.addEventListener('change', saveDraft);
+        element.addEventListener('input', saveDraft);
+    });
+}
+
+function renumberStages() {
+    document.querySelectorAll('.stage-item').forEach((row, index) => {
+        const num = index + 1;
+        row.querySelector('.stage-header span').textContent = `Etapa ${num}`;
+        row.querySelector('.stage-process').setAttribute('aria-label', `Proceso para etapa ${num}`);
+        row.querySelector('.stage-product').setAttribute('aria-label', `Producto para etapa ${num}`);
+        row.querySelector('.stage-quantity').setAttribute('aria-label', `Cantidad requerida para etapa ${num}`);
+        row.querySelector('.stage-time').setAttribute('aria-label', `Tiempo para etapa ${num}`);
+        row.querySelector('.stage-unit').setAttribute('aria-label', `Unidad de tiempo para etapa ${num}`);
+        row.querySelector('.remove-stage-btn').setAttribute('aria-label', `Eliminar etapa ${num}`);
+    });
+}
+
+function saveDraft() {
+    const prototypeForm = document.getElementById('prototypeForm');
+    if (!prototypeForm) return;
+
+    const draftData = {
+        nombre: document.getElementById('prototypeName').value,
+        responsable: document.getElementById('responsible').value,
+        notas: document.getElementById('notes').value,
+        estado: document.getElementById('prototypeState').value,
+        etapas: []
+    };
+
+    document.querySelectorAll('.stage-item').forEach(row => {
+        const processId = row.querySelector('.stage-process').value;
+        const productId = row.querySelector('.stage-product').value;
+        const quantity = parseFloat(row.querySelector('.stage-quantity').value);
+        const time = parseInt(row.querySelector('.stage-time').value);
+        const unit = row.querySelector('.stage-unit').value;
+
+        if (processId && productId && quantity && time) {
+            draftData.etapas.push({
+                id_proceso_guardado: processId,
+                id_producto: productId,
+                cantidad_requerida: quantity,
+                tiempo: time,
+                unidad: unit
+            });
+        }
+    });
+
+    localStorage.setItem('prototypeDraft', JSON.stringify(draftData));
+}
+
+function loadDraft() {
+    const draft = localStorage.getItem('prototypeDraft');
+    if (!draft) return;
+
+    const draftData = JSON.parse(draft);
+    document.getElementById('prototypeName').value = draftData.nombre || '';
+    document.getElementById('responsible').value = draftData.responsable || '';
+    document.getElementById('notes').value = draftData.notas || '';
+    document.getElementById('prototypeState').value = draftData.estado || '';
+
+    const stagesContainer = document.getElementById('stagesContainer');
+    stagesContainer.innerHTML = '';
+    if (draftData.etapas && draftData.etapas.length > 0) {
+        draftData.etapas.forEach((etapa, index) => {
+            addStageRow(
+                index + 1,
+                etapa.id_proceso,
+                etapa.id_producto,
+                etapa.cantidad_requerida,
+                etapa.tiempo,
+                etapa.unidad
+            );
+        });
+    } else {
+        addStageRow(1);
+    }
 }
 
 function fetchAndUpdateLotes() {
@@ -396,8 +678,8 @@ function fetchAndUpdateLotes() {
 }
 
 async function fetchAndUpdatePrototypes() {
-    if (!prototypesTable) {
-        console.warn('prototypesTable no está definido.');
+    if (!prototypesGrid || !loading) {
+        console.warn('prototypesGrid o loading no están definidos.');
         return;
     }
 
@@ -407,8 +689,8 @@ async function fetchAndUpdatePrototypes() {
         return;
     }
 
-    if (loading) loading.style.display = 'block';
-    prototypesTable.innerHTML = '';
+    loading.style.display = 'block';
+    prototypesGrid.innerHTML = '';
 
     try {
         const response = await fetch(`${BASE_URL}/api/prototipos`, {
@@ -427,7 +709,7 @@ async function fetchAndUpdatePrototypes() {
 
         const data = await response.json();
         if (!Array.isArray(data) || data.length === 0) {
-            prototypesTable.innerHTML = '<div class="inventory-item">No hay prototipos disponibles</div>';
+            prototypesGrid.innerHTML = '<div class="inventory-item">No hay prototipos disponibles</div>';
             return;
         }
 
@@ -436,71 +718,72 @@ async function fetchAndUpdatePrototypes() {
         );
 
         if (filteredPrototypes.length === 0) {
-            prototypesTable.innerHTML = '<div class="inventory-item">No se encontraron prototipos</div>';
+            prototypesGrid.innerHTML = '<div class="inventory-item">No se encontraron prototipos</div>';
             return;
         }
 
-        const prototypePromises = filteredPrototypes.map(async (prototype) => {
+        for (const prototype of filteredPrototypes) {
+            // Obtener etapas para el preview
+            const etapasResponse = await fetch(`${BASE_URL}/api/prototipos/${prototype.id_prototipo}/etapas`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            const etapas = await etapasResponse.json();
+            const totalEtapas = etapas.length;
+            let totalProductos = 0;
+            etapas.forEach(etapa => {
+                totalProductos += etapa.cantidad_requerida ? 1 : 0; // Contar productos usados en cada etapa
+            });
+
+            // Determinar clase según el estado
+            const stateClass = prototype.estado === 'aprobado' ? 'state-approved' :
+                              prototype.estado === 'rechazado' ? 'state-rejected' : 'state-pending';
+
             const card = document.createElement('div');
-            card.className = 'inventory-item';
-            const stockStatus = prototype.stock_suficiente !== undefined
-                ? (prototype.stock_suficiente
-                    ? '<span class="stock-ok">Stock suficiente</span>'
-                    : `<span class="stock-low">Stock insuficiente</span><br>${prototype.stock_detalles?.map(d => `${d.producto}: ${d.cantidad_requerida}/${d.cantidad_disponible}`).join('<br>') || ''}`)
-                : '<span class="stock-ok">Stock no especificado</span>';
+            card.className = `inventory-item ${stateClass}`;
+            card.setAttribute('role', 'listitem');
             card.innerHTML = `
                 <h3>${sanitizeHTML(prototype.nombre)}</h3>
-                <p><strong>Estado:</strong> ${sanitizeHTML(prototype.estado)}</p>
                 <p><strong>Responsable:</strong> ${sanitizeHTML(prototype.responsable)}</p>
-                <p><strong>Stock:</strong> ${stockStatus}</p>
                 <p><strong>Fecha:</strong> ${new Date(prototype.fecha_creacion).toLocaleDateString()}</p>
-                <div id="etapas-prototipo-${prototype.id_prototipo}" class="etapa-progress"></div>
-                <button class="edit-btn" data-id="${prototype.id_prototipo}">Editar</button>
-                <button class="delete-btn" data-id="${prototype.id_prototipo}">Eliminar</button>
+                <p><strong>Estado:</strong> ${sanitizeHTML(prototype.estado)}</p>
+                <p><strong>Etapas/Productos:</strong> ${totalEtapas} etapas · ${totalProductos} productos</p>
+                <div class="actions">
+                    <button class="edit-btn" data-id="${prototype.id_prototipo}" aria-label="Editar prototipo ${sanitizeHTML(prototype.nombre)}">Editar</button>
+                    <button class="etapas-btn" data-id="${prototype.id_prototipo}" aria-label="Ver etapas de ${sanitizeHTML(prototype.nombre)}">Ver Etapas</button>
+                    <button class="delete-btn" data-id="${prototype.id_prototipo}" aria-label="Eliminar prototipo ${sanitizeHTML(prototype.nombre)}">Eliminar</button>
+                </div>
             `;
-            prototypesTable.appendChild(card);
+            prototypesGrid.appendChild(card);
+        }
 
-            const etapasContainer = document.getElementById(`etapas-prototipo-${prototype.id_prototipo}`);
-            etapasContainer.innerHTML = '<h4>Etapas:</h4>';
-            if (!prototype.etapas || prototype.etapas.length === 0) {
-                etapasContainer.innerHTML += '<p>No hay etapas definidas.</p>';
-            } else {
-                const etapasList = document.createElement('ul');
-                prototype.etapas.forEach((etapa, index) => {
-                    const stockClass = etapa.stock_suficiente ? 'stock-ok' : 'stock-low';
-                    const etapaItem = document.createElement('li');
-                    etapaItem.innerHTML = `
-                        Etapa ${index + 1}: ${sanitizeHTML(etapa.nombre_proceso)} (${etapa.tiempo} min)<br>
-                        ${sanitizeHTML(etapa.nombre_producto)}: ${etapa.cantidad_requerida} (Stock: <span class="${stockClass}">${etapa.stock_disponible}</span>)
-                    `;
-                    etapasList.appendChild(etapaItem);
-                });
-                etapasContainer.appendChild(etapasList);
+        // Usamos delegación de eventos para los botones
+        prototypesGrid.addEventListener('click', (e) => {
+            if (e.target.classList.contains('edit-btn')) {
+                handleEditPrototype(e);
+            } else if (e.target.classList.contains('etapas-btn')) {
+                manageEtapas(e.target.getAttribute('data-id'));
+            } else if (e.target.classList.contains('delete-btn')) {
+                deletePrototype(e.target.getAttribute('data-id'));
             }
         });
-
-        await Promise.all(prototypePromises);
-        document.querySelectorAll('.edit-btn').forEach(btn => btn.addEventListener('click', handleEditPrototype));
-        document.querySelectorAll('.delete-btn').forEach(btn => btn.addEventListener('click', () => deletePrototype(btn.getAttribute('data-id'))));
     } catch (error) {
         console.error('Error al cargar prototipos:', error.message);
-        prototypesTable.innerHTML = `<div class="inventory-item">Error: ${sanitizeHTML(error.message)}</div>`;
+        prototypesGrid.innerHTML = `<div class="inventory-item">Error: ${sanitizeHTML(error.message)}</div>`;
     } finally {
-        if (loading) loading.style.display = 'none';
+        loading.style.display = 'none';
     }
 }
 
 async function loadPrototypeForEdit(prototypeId) {
-    const token = localStorage.getItem('token');
-    if (!token) {
-        alert('No se encontró un token de autenticación. Por favor, inicia sesión nuevamente.');
-        window.location.href = 'index.html';
-        return;
-    }
-
     try {
+        const token = localStorage.getItem('token');
+        if (!token) {
+            alert('No se encontró un token de autenticación. Por favor, inicia sesión nuevamente.');
+            window.location.href = 'index.html';
+            return;
+        }
+
         const response = await fetch(`${BASE_URL}/api/prototipos/${prototypeId}`, {
-            method: 'GET',
             headers: {
                 'Authorization': `Bearer ${token}`,
                 'Content-Type': 'application/json'
@@ -509,42 +792,50 @@ async function loadPrototypeForEdit(prototypeId) {
 
         if (!response.ok) {
             const errorData = await response.json();
-            if (response.status === 401) {
-                localStorage.removeItem('token');
-                alert('Tu sesión ha expirado. Por favor, inicia sesión nuevamente.');
-                window.location.href = 'index.html';
-                return;
-            }
-            throw new Error(errorData.error || `Error al cargar el prototipo: ${response.status}`);
+            throw new Error(errorData.error || `Error al cargar prototipo: ${response.status}`);
         }
 
         const data = await response.json();
-        if (!data.prototipo) {
-            throw new Error('Estructura de datos inválida: prototipo no encontrado');
-        }
-
         document.getElementById('prototypeModalTitle').textContent = 'Editar Prototipo';
-        document.getElementById('prototypeName').value = data.prototipo.nombre || '';
-        document.getElementById('responsible').value = data.prototipo.responsable || '';
-        document.getElementById('notes').value = data.prototipo.notas || '';
-        document.getElementById('prototypeState').value = data.prototipo.estado || '';
+        document.getElementById('prototypeId').value = prototypeId;
+        document.getElementById('prototypeName').value = data.nombre;
+        document.getElementById('responsible').value = data.responsable;
+        document.getElementById('notes').value = data.notas || '';
+        document.getElementById('prototypeState').value = data.estado;
 
         const stagesContainer = document.getElementById('stagesContainer');
         stagesContainer.innerHTML = '';
+
+        // Primero cargar los selectores
+        await Promise.all([
+            loadProcessesIntoSelect(document.createElement('select')),
+            loadVerifiedProductsIntoSelect(document.createElement('select'))
+        ]);
+
+        // Luego agregar las etapas
         if (data.etapas && data.etapas.length > 0) {
-            await Promise.all([
-                loadProcessesIntoSelect(document.createElement('select')),
-                loadVerifiedProductsIntoSelect(document.createElement('select'))
-            ]);
-            data.etapas.forEach((etapa, index) =>
-                addStageRow(index + 1, etapa.id_proceso, etapa.id_producto, etapa.cantidad_requerida, etapa.tiempo)
-            );
+            for (const [index, etapa] of data.etapas.entries()) {
+                addStageRow(
+                    index + 1,
+                    etapa.id_proceso_guardado,
+                    etapa.id_producto,
+                    etapa.cantidad_requerida,
+                    etapa.tiempo,
+                    'min'
+                );
+            }
         } else {
             addStageRow(1);
         }
 
-        editingPrototypeId = prototypeId;
-        prototypeModalOverlay.style.display = 'flex';
+        // Mostrar el modal
+        const prototypeModalOverlay = document.getElementById('prototypeModalOverlay');
+        if (prototypeModalOverlay) {
+            prototypeModalOverlay.style.display = 'flex';
+        }
+
+        // No cargar borrador si estamos editando un prototipo existente
+        localStorage.removeItem('prototypeDraft');
     } catch (error) {
         console.error('Error al cargar prototipo para edición:', error);
         alert('Error al cargar el prototipo: ' + error.message);
@@ -984,12 +1275,13 @@ async function loadProveedores() {
                 grid.appendChild(row);
             });
 
-            document.querySelectorAll('.edit-btn').forEach(btn => {
-                btn.addEventListener('click', () => editProveedor(btn.dataset.id));
-            });
-
-            document.querySelectorAll('.delete-btn').forEach(btn => {
-                btn.addEventListener('click', () => deleteProveedor(btn.dataset.id));
+            // Use event delegation for edit and delete buttons
+            grid.addEventListener('click', (e) => {
+                if (e.target.classList.contains('edit-btn')) {
+                    editProveedor(e.target.dataset.id);
+                } else if (e.target.classList.contains('delete-btn')) {
+                    deleteProveedor(e.target.dataset.id);
+                }
             });
         }
 
@@ -1276,9 +1568,7 @@ function fetchAndUpdateTable() {
     }
 
     loading.style.display = 'block';
-
-    // Limpiar contenido previo
-    inventoryTable.innerHTML = '';
+    inventoryTable.innerHTML = ''; // Ensure the table is cleared before fetching
 
     fetch(`${BASE_URL}/api/inventario`, {
         headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
@@ -1306,37 +1596,41 @@ function fetchAndUpdateTable() {
 
             if (filteredData.length === 0) {
                 inventoryTable.innerHTML = '<div class="inventory-item">No se encontraron productos</div>';
-            } else {
-                filteredData.forEach(item => {
-                    const quantityValue = extractQuantity(item.quantity);
-                    const stockMaximo = item.stock_maximo || 0;
-                    const stockPercentage = stockMaximo > 0 ? (quantityValue / stockMaximo) * 100 : 0;
-                    let stockClass = stockPercentage <= 30 ? 'expire-soon' : stockPercentage <= 50 ? 'expire-warning' : 'expire-safe';
-
-                    const card = document.createElement('div');
-                    card.className = `inventory-item ${stockClass}`;
-                    card.innerHTML = `
-                        <h3>${item.product || 'Sin nombre'}</h3>
-                        <p><strong>Cantidad:</strong> ${quantityValue || '0'} ${item.unit || ''}</p>
-                        <p><strong>Tipo:</strong> ${item.type || 'Sin tipo'}</p>
-                        <p><strong>Unidad:</strong> ${item.unit || 'Sin unidad'}</p>
-                        <p><strong>Stock Mínimo:</strong> ${item.stock_minimo || '0'}</p>
-                        <p><strong>Stock Máximo:</strong> ${stockMaximo || 'N/A'}</p>
-                        <p><strong>Precio:</strong> $${item.precio ? item.precio.toFixed(2) : '0.00'}</p>
-                        <p><strong>Propiedades:</strong> 
-                            ${item.es_toxico ? 'Tóxico ' : ''}${item.es_corrosivo ? 'Corrosivo ' : ''}${item.es_inflamable ? 'Inflamable' : ''}
-                        </p>
-                        <button class="edit-btn" data-id="${item.id || ''}" ${currentUser.rol.toLowerCase() === 'bodeguero' ? 'style="display:none;"' : ''}>Editar</button>
-                    `;
-                    inventoryTable.appendChild(card);
-
-                    // Añadir event listener directamente al botón
-                    const editBtn = card.querySelector('.edit-btn');
-                    if (editBtn) {
-                        editBtn.onclick = () => handleEdit({ target: editBtn });
-                    }
-                });
+                return;
             }
+
+            // Clear again to ensure no duplicates if DOM changes
+            inventoryTable.innerHTML = '';
+
+            filteredData.forEach(item => {
+                const quantityValue = extractQuantity(item.quantity);
+                const stockMaximo = item.stock_maximo || 0;
+                const stockPercentage = stockMaximo > 0 ? (quantityValue / stockMaximo) * 100 : 0;
+                let stockClass = stockPercentage <= 30 ? 'expire-soon' : stockPercentage <= 50 ? 'expire-warning' : 'expire-safe';
+
+                const card = document.createElement('div');
+                card.className = `inventory-item ${stockClass}`;
+                card.innerHTML = `
+                    <h3>${item.product || 'Sin nombre'}</h3>
+                    <p><strong>Cantidad:</strong> ${quantityValue || '0'} ${item.unit || ''}</p>
+                    <p><strong>Tipo:</strong> ${item.type || 'Sin tipo'}</p>
+                    <p><strong>Unidad:</strong> ${item.unit || 'Sin unidad'}</p>
+                    <p><strong>Stock Mínimo:</strong> ${item.stock_minimo || '0'}</p>
+                    <p><strong>Stock Máximo:</strong> ${stockMaximo || 'N/A'}</p>
+                    <p><strong>Precio:</strong> $${item.precio ? item.precio.toFixed(2) : '0.00'}</p>
+                    <p><strong>Propiedades:</strong> 
+                        ${item.es_toxico ? 'Tóxico ' : ''}${item.es_corrosivo ? 'Corrosivo ' : ''}${item.es_inflamable ? 'Inflamable' : ''}
+                    </p>
+                    <button class="edit-btn" data-id="${item.id || ''}" ${currentUser.rol.toLowerCase() === 'bodeguero' ? 'style="display:none;"' : ''}>Editar</button>
+                `;
+                inventoryTable.appendChild(card);
+            });
+
+            // Use event delegation for edit buttons
+            inventoryTable.querySelectorAll('.edit-btn').forEach(btn => {
+                btn.removeEventListener('click', handleEdit); // Prevent duplicate listeners
+                btn.addEventListener('click', handleEdit);
+            });
         })
         .catch(error => {
             console.error('Error al cargar inventario:', error.message);
@@ -1457,8 +1751,7 @@ async function loadPrototipos() {
         const response = await fetch(`${BASE_URL}/api/prototipos`, {
             method: 'GET',
             headers: {
-                'Authorization': `Bearer ${token}`,
-                'Content-Type': 'application/json'
+                'Authorization': `Bearer ${token}`
             }
         });
 
@@ -1663,39 +1956,45 @@ async function editPrototipo(id) {
 
 async function savePrototipo() {
     try {
-        const idPrototipo = document.getElementById('prototipoForm').dataset.id;
-        const nombre = document.getElementById('prototipoNombre').value.trim();
-        const responsable = document.getElementById('prototipoResponsable').value.trim();
-        const estado = document.getElementById('prototipoEstado').value.trim();
-
-        if (!nombre || !responsable || !estado) {
-            alert('Todos los campos son obligatorios.');
-            return;
-        }
-
-        const materiales = [];
-        document.querySelectorAll('.material-item').forEach(item => {
-            const idProducto = item.querySelector('.material-product').value;
-            const cantidad = parseFloat(item.querySelector('.material-cantidad').value);
-            if (idProducto && cantidad > 0) {
-                materiales.push({ id_producto: idProducto, cantidad: cantidad });
-            }
-        });
-
-        const data = {
-            nombre: nombre,
-            responsable: responsable,
-            estado: estado,
-            materiales: materiales,
-            fecha_creacion: new Date().toISOString().split('T')[0]
-        };
-
         const token = localStorage.getItem('token');
         if (!token) {
             alert('No se encontró un token de autenticación. Por favor, inicia sesión nuevamente.');
             window.location.href = 'index.html';
             return;
         }
+
+        const prototypeId = document.getElementById('prototypeId').value;
+        const prototypeData = {
+            nombre: document.getElementById('prototypeName').value,
+            responsable: document.getElementById('responsible').value,
+            notas: document.getElementById('notes').value,
+            estado: document.getElementById('prototypeState').value,
+            etapas: []
+        };
+
+        document.querySelectorAll('.stage-item').forEach((row, index) => {
+            const processId = row.querySelector('.stage-process').value;
+            const productId = row.querySelector('.stage-product').value;
+            const quantity = parseFloat(row.querySelector('.stage-quantity').value);
+            const time = parseInt(row.querySelector('.stage-time').value);
+            const unit = row.querySelector('.stage-unit').value;
+
+            if (processId && productId && quantity && time) {
+                let tiempoFinal = time;
+                if (unit === 'hr') {
+                    tiempoFinal = time * 60;
+                } else if (unit === 'day') {
+                    tiempoFinal = time * 60 * 24;
+                }
+
+                prototypeData.etapas.push({
+                    id_proceso_guardado: processId,
+                    id_producto: productId,
+                    cantidad_requerida: quantity,
+                    tiempo: tiempoFinal
+                });
+            }
+        });
 
         const method = idPrototipo ? 'PUT' : 'POST';
         const url = idPrototipo ? `${BASE_URL}/api/prototipos/${idPrototipo}` : `${BASE_URL}/api/prototipos`;
@@ -1707,7 +2006,7 @@ async function savePrototipo() {
                 'Authorization': `Bearer ${token}`
             },
             credentials: 'include',
-            body: JSON.stringify(data)
+            body: JSON.stringify(prototypeData)
         });
 
         if (!response.ok) {
@@ -1793,7 +2092,7 @@ async function manageEtapas(prototipoId) {
                 const etapaDiv = document.createElement('div');
                 etapaDiv.className = 'etapa-item';
                 etapaDiv.innerHTML = `
-                    <p>Etapa ${index + 1}: ${etapa.nombre_proceso} (${etapa.tiempo} min)</p>
+                    <p>Etapa ${index + 1}: ${etapa.nombre_proceso} (${etapa.tiempo} ${etapa.unidad || 'min'})</p>
                     <p>Producto: ${etapa.nombre_producto} - Cantidad: ${etapa.cantidad_requerida}</p>
                     <button type="button" class="remove-etapa-btn" data-id="${etapa.id_etapa}">Eliminar</button>
                 `;
@@ -1847,8 +2146,18 @@ async function saveEtapa() {
         const cantidad = parseFloat(document.getElementById('etapaCantidad').value);
         const tiempo = parseInt(document.getElementById('etapaTiempo').value);
 
-        if (!idProceso || !idProducto || !cantidad || !tiempo) {
+        if (!idProceso || !idProducto || isNaN(cantidad) || isNaN(tiempo)) {
             alert('Todos los campos son obligatorios.');
+            return;
+        }
+
+        if (cantidad <= 0) {
+            alert('La cantidad debe ser mayor que 0.');
+            return;
+        }
+
+        if (tiempo <= 0) {
+            alert('El tiempo debe ser mayor que 0.');
             return;
         }
 
@@ -1860,7 +2169,7 @@ async function saveEtapa() {
         }
 
         const data = {
-            id_proceso: idProceso,
+            id_proceso_guardado: idProceso, // Cambiado de id_proceso a id_proceso_guardado
             id_producto: idProducto,
             cantidad_requerida: cantidad,
             tiempo: tiempo
@@ -1909,16 +2218,17 @@ document.addEventListener('DOMContentLoaded', () => {
         })
         .then(data => {
             currentUser = data;
-            const loggedInUser = document.getElementById('loggedInUser'); // Cambiado de userGreeting a loggedInUser
+            const loggedInUser = document.getElementById('loggedInUser');
             if (loggedInUser) {
                 loggedInUser.textContent = `Hola, ${currentUser.nombre} (${currentUser.rol})`;
             }
 
+            // Llamar a setupNavLinks() aquí
             setupNavLinks();
 
             loading = document.getElementById('loading');
-            tableBody = document.getElementById('inventory-table'); // Cambiado de tableBody a inventory-table
-            checklistBody = document.getElementById('checklist-body'); // Cambiado de checklistBody a checklist-body
+            inventoryTable = document.getElementById('inventory-table');
+            checklistBody = document.getElementById('checklist-body');
             proveedoresTable = document.getElementById('proveedoresTable');
             modalOverlay = document.getElementById('modalOverlay');
             editProductModalOverlay = document.getElementById('editProductModalOverlay');
@@ -1927,7 +2237,7 @@ document.addEventListener('DOMContentLoaded', () => {
             tipoModalOverlay = document.getElementById('tipoModalOverlay');
             lotesTable = document.getElementById('lotesTable');
             loteModalOverlay = document.getElementById('loteModalOverlay');
-            prototypesTable = document.getElementById('prototypesTable');
+            prototypesGrid = document.getElementById('prototypesGrid');
             prototypeModalOverlay = document.getElementById('prototypeModalOverlay');
 
             const pagePath = window.location.pathname;
@@ -1938,7 +2248,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 loadProveedoresIntoForm();
                 fetchAndUpdateTable();
 
-                const addBtn = document.getElementById('addBtn');
+                const addBtn = document.getElementById('addProductBtn');
                 if (addBtn && currentUser.rol.toLowerCase() !== 'bodeguero') {
                     addBtn.style.display = 'block';
                     addBtn.addEventListener('click', () => {
@@ -1958,10 +2268,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const searchInput = document.getElementById('searchInput');
                 const clearSearchBtn = document.getElementById('clearSearchBtn');
                 if (searchInput) {
-                    // Remover event listeners previos para evitar duplicados
-                    searchInput.removeEventListener('input', handleSearchInput); // Remover si ya existe
-                    searchInput.addEventListener('input', handleSearchInput);
-
+                    
                     function handleSearchInput() {
                         searchTerm = searchInput.value;
                         if (clearSearchBtn) {
@@ -1969,14 +2276,44 @@ document.addEventListener('DOMContentLoaded', () => {
                         }
                         fetchAndUpdateTable();
                     }
+                
+                    
+                    searchInput.removeEventListener('input', handleSearchInput);
+                    searchInput.addEventListener('input', handleSearchInput);
+                
+                    
+                    if (clearSearchBtn) {
+                        clearSearchBtn.addEventListener('click', () => {
+                            searchInput.value = '';
+                            searchTerm = '';
+                            clearSearchBtn.style.display = 'none';
+                            fetchAndUpdateTable();
+                        });
+                    }
                 }
 
                 const filterBtn = document.getElementById('filterBtn');
+                const filterModalOverlay = document.getElementById('filterModalOverlay');
                 if (filterBtn) {
                     filterBtn.addEventListener('click', () => {
-                        const filterOptions = document.getElementById('filterOptions');
-                        if (filterOptions) {
-                            filterOptions.style.display = filterOptions.style.display === 'none' ? 'block' : 'none';
+                        if (filterModalOverlay) {
+                            filterModalOverlay.style.display = 'flex'; // Mostrar el modal
+                        } else {
+                            console.error("filterModalOverlay no encontrado");
+                        }
+                    });
+                }
+                
+                // Manejar el formulario de filtros para aplicar el filtro
+                const filterForm = document.getElementById('filterForm');
+                if (filterForm) {
+                    filterForm.addEventListener('submit', (e) => {
+                        e.preventDefault();
+                        const filterType = document.getElementById('filterType');
+                        if (filterType) {
+                            currentFilter = filterType.value;
+                            fetchAndUpdateTable(); // Actualizar la tabla con el filtro aplicado
+                            filterModalOverlay.style.display = 'none'; // Cerrar el modal después de aplicar
                         }
                     });
                 }
@@ -2071,6 +2408,70 @@ document.addEventListener('DOMContentLoaded', () => {
                                 console.error('Error al actualizar producto:', error);
                                 alert('Error al actualizar: ' + error.message);
                             });
+                    });
+                }
+
+                const exportExcelBtn = document.getElementById('exportExcelBtn');
+                if (exportExcelBtn) {
+                    exportExcelBtn.addEventListener('click', () => {
+                        if (typeof XLSX === 'undefined') {
+                            alert('La librería SheetJS no está cargada. Por favor, verifica que el script esté incluido.');
+                            return;
+                        }
+
+                        fetch(`${BASE_URL}/api/inventario`, {
+                            headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+                        })
+                        .then(response => response.json())
+                        .then(data => {
+                            const worksheet = XLSX.utils.json_to_sheet(data);
+                            const workbook = XLSX.utils.book_new();
+                            XLSX.utils.book_append_sheet(workbook, worksheet, 'Inventario');
+
+                            // Verificar si estamos en PyWebView (aplicación empaquetada)
+                            if (window.pywebview) {
+                                // En PyWebView, usamos el diálogo de guardado nativo
+                                window.pywebview.api.saveFileDialog({
+                                    title: 'Guardar archivo Excel',
+                                    default_filename: 'inventario.xlsx',
+                                    filters: ['Excel Files (*.xlsx)', 'All Files (*.*)']
+                                }).then(filePath => {
+                                    if (filePath) {
+                                        try {
+                                            const buffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'buffer' });
+                                            const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+                                            const reader = new FileReader();
+                                            reader.onload = function(event) {
+                                                const arrayBuffer = event.target.result;
+                                                window.pywebview.api.saveFile(filePath, arrayBuffer).then(() => {
+                                                    alert('Exportación exitosa. Archivo guardado en: ' + filePath);
+                                                }).catch(error => {
+                                                    console.error('Error al guardar el archivo:', error);
+                                                    alert('Error al exportar a Excel: ' + error.message);
+                                                });
+                                            };
+                                            reader.readAsArrayBuffer(blob);
+                                        } catch (error) {
+                                            console.error('Error al procesar el archivo:', error);
+                                            alert('Error al exportar a Excel: ' + error.message);
+                                        }
+                                    } else {
+                                        alert('Exportación cancelada.');
+                                    }
+                                }).catch(error => {
+                                    console.error('Error en el diálogo de guardado:', error);
+                                    alert('Error al mostrar el diálogo de guardado: ' + error.message);
+                                });
+                            } else {
+                                // En modo web (localhost), usamos la descarga automática
+                                XLSX.writeFile(workbook, 'inventario.xlsx');
+                                alert('Exportación exitosa');
+                            }
+                        })
+                        .catch(error => {
+                            console.error('Error al exportar a Excel:', error);
+                            alert('Error al exportar a Excel: ' + error.message);
+                        });
                     });
                 }
 
@@ -2197,7 +2598,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             } else if (pagePath.includes('prototipos.html')) {
                 fetchAndUpdatePrototypes();
-
+            
                 const addPrototypeBtn = document.getElementById('addPrototypeBtn');
                 if (addPrototypeBtn) {
                     addPrototypeBtn.addEventListener('click', () => {
@@ -2210,7 +2611,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         prototypeModalOverlay.style.display = 'flex';
                     });
                 }
-
+            
                 const prototypeForm = document.getElementById('prototypeForm');
                 if (prototypeForm) {
                     prototypeForm.addEventListener('submit', async (e) => {
@@ -2223,26 +2624,36 @@ document.addEventListener('DOMContentLoaded', () => {
                             etapas: []
                         };
 
-                        document.querySelectorAll('.stage-row').forEach((row, index) => {
+                        // Recolectar datos de las etapas
+                        document.querySelectorAll('.stage-item').forEach((row, index) => {
                             const processId = row.querySelector('.stage-process').value;
                             const productId = row.querySelector('.stage-product').value;
                             const quantity = parseFloat(row.querySelector('.stage-quantity').value);
                             const time = parseInt(row.querySelector('.stage-time').value);
-
+                            const unit = row.querySelector('.stage-unit').value;
+                        
                             if (processId && productId && quantity && time) {
+                                let tiempoFinal = time;
+                                // Convertir tiempo según la unidad
+                                if (unit === 'hr') {
+                                    tiempoFinal = time * 60;
+                                } else if (unit === 'day') {
+                                    tiempoFinal = time * 60 * 24;
+                                }
+                                
                                 prototypeData.etapas.push({
-                                    id_proceso: processId,
+                                    id_proceso_guardado: processId,
                                     id_producto: productId,
                                     cantidad_requerida: quantity,
-                                    tiempo: time
+                                    tiempo: tiempoFinal
                                 });
                             }
                         });
 
-                        const method = editingPrototypeId ? 'PUT' : 'POST';
-                        const url = editingPrototypeId ? `${BASE_URL}/api/prototipos/${editingPrototypeId}` : `${BASE_URL}/api/prototipos`;
-
                         try {
+                            const method = editingPrototypeId ? 'PUT' : 'POST';
+                            const url = editingPrototypeId ? `${BASE_URL}/api/prototipos/${editingPrototypeId}` : `${BASE_URL}/api/prototipos`;
+                            
                             const response = await fetch(url, {
                                 method: method,
                                 headers: {
@@ -2254,18 +2665,20 @@ document.addEventListener('DOMContentLoaded', () => {
 
                             if (!response.ok) {
                                 const errorData = await response.json();
-                                throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
+                                throw new Error(errorData.error || 'Error al guardar el prototipo');
                             }
 
-                            prototypeModalOverlay.style.display = 'none';
+                            const result = await response.json();
+                            alert(result.message);
+                            closePrototypeModal();
                             fetchAndUpdatePrototypes();
                         } catch (error) {
-                            console.error('Error al guardar prototipo:', error.message);
-                            alert('Error al guardar prototipo: ' + error.message);
+                            console.error('Error:', error);
+                            alert('Error al guardar el prototipo: ' + error.message);
                         }
                     });
                 }
-
+            
                 const addStageBtn = document.getElementById('addStageBtn');
                 if (addStageBtn) {
                     addStageBtn.addEventListener('click', () => {
@@ -2274,12 +2687,36 @@ document.addEventListener('DOMContentLoaded', () => {
                         addStageRow(stageCount);
                     });
                 }
-
+            
                 const searchInput = document.getElementById('searchPrototypeInput');
+                const clearSearchBtn = document.getElementById('clearSearchBtn');
                 if (searchInput) {
-                    searchInput.addEventListener('input', () => {
+                    function handleSearchInput() {
                         searchTerm = searchInput.value;
+                        if (clearSearchBtn) {
+                            clearSearchBtn.style.display = searchTerm ? 'inline-block' : 'none';
+                        }
                         fetchAndUpdatePrototypes();
+                    }
+            
+                    searchInput.removeEventListener('input', handleSearchInput);
+                    searchInput.addEventListener('input', handleSearchInput);
+            
+                    if (clearSearchBtn) {
+                        clearSearchBtn.addEventListener('click', () => {
+                            searchInput.value = '';
+                            searchTerm = '';
+                            clearSearchBtn.style.display = 'none';
+                            fetchAndUpdatePrototypes();
+                        });
+                    }
+                }
+            
+                const etapasForm = document.getElementById('etapasForm');
+                if (etapasForm) {
+                    etapasForm.addEventListener('submit', (e) => {
+                        e.preventDefault();
+                        saveEtapa();
                     });
                 }
             }
@@ -2312,83 +2749,45 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 if (window.location.pathname.includes('index.html')) {
-    const loginBtn = document.getElementById('loginBtn');
-    if (loginBtn) {
-        loginBtn.addEventListener('click', (e) => {
-            e.preventDefault(); // Por si acaso
+    console.log("Inicializando manejador de login");
+
+    const loginForm = document.getElementById('loginForm');
+    if (loginForm) {
+        loginForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            console.log("Formulario de login enviado");
+
             const username = document.getElementById('username').value;
             const password = document.getElementById('password').value;
 
-            // Validar que los campos no estén vacíos
+            console.log("Datos del formulario:", { username, password });
+
             if (!username || !password) {
                 alert('Por favor, completa todos los campos.');
                 return;
             }
 
-            fetch(`${BASE_URL}/api/login`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username, password })
-            })
-                .then(response => {
-                    if (!response.ok) {
-                        return response.json().then(errorData => {
-                            throw new Error(errorData.error || 'Error en el login');
-                        });
-                    }
-                    return response.json();
-                })
-                .then(data => {
-                    localStorage.setItem('token', data.token);
-                    window.location.href = 'dashboard.html';
-                })
-                .catch(error => {
-                    console.error('Error en el login:', error.message);
-                    alert('Error en el login: ' + error.message);
-                });
-        });
-    }
-
-    const forgotPasswordLink = document.getElementById('forgotPasswordLink');
-    const forgotPasswordModal = document.getElementById('forgotPasswordModal');
-    const forgotPasswordForm = document.getElementById('forgotPasswordForm');
-
-    if (forgotPasswordLink && forgotPasswordModal) {
-        forgotPasswordLink.addEventListener('click', (e) => {
-            e.preventDefault();
-            forgotPasswordModal.style.display = 'flex';
-        });
-
-        const closeForgotModal = forgotPasswordModal.querySelector('.close');
-        if (closeForgotModal) {
-            closeForgotModal.addEventListener('click', () => {
-                forgotPasswordModal.style.display = 'none';
-            });
-        }
-
-        if (forgotPasswordForm) {
-            forgotPasswordForm.addEventListener('submit', (e) => {
-                e.preventDefault();
-                const email = document.getElementById('forgotEmail').value;
-
-                fetch(`${BASE_URL}/api/forgot-password`, {
+            try {
+                const response = await fetch('/api/login', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ email })
-                })
-                    .then(response => {
-                        if (!response.ok) throw new Error('Error al enviar solicitud');
-                        return response.json();
-                    })
-                    .then(data => {
-                        alert('Se ha enviado un enlace de recuperación a tu correo.');
-                        forgotPasswordModal.style.display = 'none';
-                    })
-                    .catch(error => {
-                        console.error('Error al enviar solicitud:', error);
-                        alert('Error al enviar solicitud: ' + error.message);
-                    });
-            });
-        }
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ username, password })
+                });
+
+                const data = await response.json();
+                
+                if (!response.ok) {
+                    throw new Error(data.error || 'Error en el login');
+                }
+
+                localStorage.setItem('token', data.token);
+                window.location.href = 'dashboard.html';
+            } catch (error) {
+                console.error('Error en el login:', error.message);
+                alert('Error en el login: ' + error.message);
+            }
+        });
     }
 }

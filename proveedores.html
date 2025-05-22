@@ -21,7 +21,7 @@
         <nav class="nav">
             <ul>
                 <li><a href="dashboard.html" id="dashboardLink">Inventario</a></li>
-                <li><a href="prototipos.html" id="prototypeLink">Prototipos</a></li>
+
                 <li><a href="reportes.html" id="reportLink">Reportes</a></li>
                 <li><a href="proveedores.html" id="proveedoresLink" class="active">Proveedores</a></li>
             </ul>
@@ -54,7 +54,7 @@
     </div>
 
     <!-- Modal para Proveedores -->
-    <div id="proveedorModalOverlay" class="modal-overlay">
+    <div id="proveedorModalOverlay" class="modal-overlay" style="display: none;">
         <div class="modal">
             <h2 id="proveedorModalTitle">Agregar Proveedor</h2>
             <form id="proveedorForm">
@@ -76,7 +76,7 @@
                 </div>
                 <div class="modal-buttons">
                     <button type="submit" id="saveProveedorBtn" class="btn btn-primary">Guardar</button>
-                    <button type="button" id="closeProveedorModalBtn" class="btn btn-secondary">Cerrar</button>
+                    <button type="button" id="closeProveedorModalBtn" class="btn btn-secondary close">Cerrar</button>
                 </div>
             </form>
         </div>

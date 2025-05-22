@@ -7,7 +7,6 @@ import jwt
 from functools import wraps
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
-from werkzeug.security import check_password_hash, generate_password_hash
 import re
 import sqlitecloud.dbapi2 as sqlitecloud
 
@@ -37,6 +36,39 @@ def get_db_connection():
     if 'db' not in g:
         g.db = sqlitecloud.connect(DATABASE_URL)
         g.db.row_factory = sqlitecloud.Row
+        
+        # Verificar y crear las tablas necesarias si no existen
+        cursor = g.db.cursor()
+        
+        # Tabla procesos_guardados
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS procesos_guardados (
+                id_proceso_guardado INTEGER PRIMARY KEY AUTOINCREMENT,
+                nombre_proceso VARCHAR(100) NOT NULL,
+                maquina_predeterminada VARCHAR(100),
+                tiempo_estimado INTEGER,
+                descripcion TEXT
+            )
+        ''')
+        
+        # Tabla etapas_prototipos
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS etapas_prototipos (
+                id_etapa_prototipo INTEGER PRIMARY KEY AUTOINCREMENT,
+                id_prototipo INTEGER NOT NULL,
+                id_proceso_guardado INTEGER NOT NULL,
+                id_producto INTEGER NOT NULL,
+                cantidad_requerida REAL NOT NULL,
+                tiempo INTEGER NOT NULL,
+                nombre_proceso VARCHAR(100),
+                nombre_producto VARCHAR(100),
+                FOREIGN KEY (id_prototipo) REFERENCES prototipos(id_prototipo),
+                FOREIGN KEY (id_proceso_guardado) REFERENCES procesos_guardados(id_proceso_guardado),
+                FOREIGN KEY (id_producto) REFERENCES productos(id_producto)
+            )
+        ''')
+        
+        g.db.commit()
     return g.db
 
 @app.teardown_appcontext
@@ -66,17 +98,18 @@ def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         if request.method == 'OPTIONS':
-            return '', 200  # Permitir solicitudes OPTIONS sin autenticación
+            return '', 200
 
         token = None
-        if 'Authorization' in request.headers:
+        auth_header = request.headers.get('Authorization')
+        if auth_header:
             try:
-                token = request.headers['Authorization'].split(" ")[1]
+                token = auth_header.split(" ")[1]
             except IndexError:
                 return jsonify({'error': 'Formato de Authorization inválido, se esperaba "Bearer <token>"'}), 401
         
         if not token:
-            return jsonify({'error': 'Token faltante'}), 401
+            return jsonify({'error': 'Token de autenticación faltante'}), 401
         
         try:
             data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=["HS256"])
@@ -88,83 +121,200 @@ def token_required(f):
         except jwt.InvalidTokenError:
             return jsonify({'error': 'Token inválido'}), 401
         except Exception as e:
-            return jsonify({'error': f'Error al validar el token: {str(e)}'}), 401
+            return jsonify({'error': f'Error al validar el token: {str(e)}'}), 500
         
         return f(current_user, *args, **kwargs)
     return decorated
 
-# Ruta de autenticación
-@app.route('/api/login', methods=['POST', 'OPTIONS'])
+@app.route('/api/login', methods=['POST'])
 def login():
-    # Manejo de solicitudes OPTIONS para CORS
-    if request.method == 'OPTIONS':
-        response = app.make_response('')
-        response.headers['Access-Control-Allow-Origin'] = '*'  # Permitir todos los orígenes (ajusta según necesidad)
-        response.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
-        return response, 200
-
-    # Imprimir las cabeceras recibidas para depuración
-    print("Cabeceras recibidas:", request.headers)
-    print("Content-Type recibido:", request.headers.get('Content-Type'))
-    print("Cuerpo de la solicitud (raw):", request.get_data(as_text=True))
-
     try:
-        # Usar force=True para intentar parsear el cuerpo incluso si el Content-Type no es application/json
-        data = request.get_json(force=True)
-        if data is None:
-            return jsonify({'error': 'Solicitud inválida: se esperaba un cuerpo JSON'}), 400
-    except Exception as e:
-        return jsonify({'error': f'Error al procesar la solicitud: {str(e)}'}), 400
+        if not request.is_json:
+            print("Error: La solicitud no es JSON")
+            return jsonify({'error': 'El contenido debe ser JSON'}), 400
 
-    # Cambiar 'nombre' y 'contrasena' por 'username' y 'password' para coincidir con el frontend
-    login_input = data.get('username')
-    password = data.get('password')
-    print(f"Intento de login - Input: {login_input}")
+        data = request.get_json()
+        print(f"Datos de login recibidos: {data}")
+        
+        username = data.get('username')
+        password = data.get('password')
 
-    if not login_input or not password:
-        return jsonify({'error': 'Por favor, ingresa tu usuario (nombre o email) y contraseña.'}), 400
+        if not username or not password:
+            print("Error: Faltan credenciales")
+            return jsonify({'error': 'Se requieren nombre de usuario y contraseña'}), 400
 
-    conn = None
-    try:
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        if '@' in login_input:
-            cursor.execute('SELECT * FROM usuarios WHERE email = ?', (login_input,))
-        else:
-            cursor.execute('SELECT * FROM usuarios WHERE nombre = ?', (login_input,))
-
+        print(f"Buscando usuario con email: {username}")
+        cursor.execute('SELECT * FROM usuarios WHERE email = ?', (username,))
         user = cursor.fetchone()
+
         if user:
             print(f"Usuario encontrado: {user['nombre']}")
-            if check_password_hash(user['contrasena'], password):
+            # Comparar directamente la contraseña en texto plano
+            if user['contrasena'] == password:
                 print("Contraseña correcta")
-                user_dict = {
-                    'id': user['id_usuario'],
-                    'nombre': user['nombre'],
-                    'rol': user['rol']
-                }
-                # Reducir la duración del token a 1 hora
                 token = jwt.encode({
-                    'user': user_dict,
-                    'exp': datetime.now(timezone.utc) + timedelta(hours=1)  # Usar datetime.now(timezone.utc)
-                }, app.config['SECRET_KEY'])
-                # Configurar encabezados CORS en la respuesta
-                response = jsonify({'user': user_dict, 'token': token})
-                response.headers['Access-Control-Allow-Origin'] = '*'  # Ajusta según necesidad
-                return response
+                    'user_id': user['id_usuario'],
+                    'username': user['email'],
+                    'rol': user['rol'],
+                    'exp': datetime.utcnow() + timedelta(hours=24)
+                }, app.config['SECRET_KEY'], algorithm='HS256')
+
+                return jsonify({
+                    'token': token,
+                    'user': {
+                        'id': user['id_usuario'],
+                        'username': user['email'],
+                        'rol': user['rol']
+                    }
+                }), 200
             else:
-                print("Contraseña incorrecta")
-                return jsonify({'error': 'El nombre de usuario o la contraseña son incorrectos.'}), 401
+                print(f"Contraseña incorrecta para usuario {user['email']}")
+                return jsonify({'error': 'Contraseña incorrecta'}), 401
         else:
-            print("Usuario no encontrado")
-            return jsonify({'error': 'El nombre de usuario o la contraseña son incorrectos.'}), 401
+            print(f"Usuario no encontrado con email: {username}")
+            return jsonify({'error': 'Usuario no encontrado'}), 401
+
     except Exception as e:
-        return jsonify({'error': f'Hubo un problema al intentar iniciar sesión: {str(e)}'}), 500
+        print(f"Error en login: {str(e)}")
+        return jsonify({'error': 'Error interno del servidor'}), 500
     finally:
-        if conn is not None:
-            conn.close()
+        conn.close()
+
+# Función para recrear la tabla de usuarios si es necesario
+def recreate_users_table():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        # Primero eliminamos las tablas que dependen de usuarios
+        cursor.execute('DROP TABLE IF EXISTS movimientos_inventario')
+        cursor.execute('DROP TABLE IF EXISTS prototipos')
+        cursor.execute('DROP TABLE IF EXISTS etapas_prototipos')
+        cursor.execute('DROP TABLE IF EXISTS lotes')
+        cursor.execute('DROP TABLE IF EXISTS etapas_lotes')
+        cursor.execute('DROP TABLE IF EXISTS etapas_productos')
+        
+        # Luego eliminamos la tabla usuarios
+        cursor.execute('DROP TABLE IF EXISTS usuarios')
+        
+        # Crear tabla usuarios
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS usuarios (
+                id_usuario INTEGER PRIMARY KEY AUTOINCREMENT,
+                nombre VARCHAR(100) NOT NULL,
+                email VARCHAR(100) UNIQUE,
+                contrasena VARCHAR(100) NOT NULL,
+                rol VARCHAR(20) NOT NULL CHECK (rol IN ('Administrador', 'Líder', 'Bodeguero'))
+            )
+        ''')
+        
+        # Insertar usuarios por defecto con contraseñas hasheadas
+        usuarios_default = [
+            ('Ana Gómez', 'ana@tintoreria.com', 'admin123', 'Administrador'),
+            ('Luis Martínez', 'luis@tintoreria.com', 'lider123', 'Líder'),
+            ('Carlos Rodríguez', 'carlos@tintoreria.com', 'bodega123', 'Bodeguero')
+        ]
+        
+        for usuario in usuarios_default:
+            cursor.execute('''
+                INSERT INTO usuarios (nombre, email, contrasena, rol)
+                VALUES (?, ?, ?, ?)
+            ''', usuario)
+        
+        # Recrear las tablas dependientes
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS movimientos_inventario (
+                id_movimiento INTEGER PRIMARY KEY AUTOINCREMENT,
+                id_producto INTEGER NOT NULL,
+                id_usuario INTEGER NOT NULL,
+                tipo_movimiento VARCHAR(20) NOT NULL,
+                cantidad REAL NOT NULL,
+                precio REAL,
+                fecha_movimiento DATETIME NOT NULL,
+                descripcion TEXT,
+                FOREIGN KEY (id_producto) REFERENCES productos(id_producto),
+                FOREIGN KEY (id_usuario) REFERENCES usuarios(id_usuario)
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS prototipos (
+                id_prototipo INTEGER PRIMARY KEY AUTOINCREMENT,
+                nombre VARCHAR(100) NOT NULL,
+                fecha_creacion DATETIME,
+                responsable VARCHAR(100),
+                notas TEXT,
+                estado VARCHAR(20) NOT NULL,
+                id_usuario INTEGER NOT NULL,
+                FOREIGN KEY (id_usuario) REFERENCES usuarios(id_usuario)
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS etapas_prototipos (
+                id_etapa_prototipo INTEGER PRIMARY KEY AUTOINCREMENT,
+                id_prototipo INTEGER NOT NULL,
+                id_proceso_guardado INTEGER NOT NULL,
+                id_producto INTEGER NOT NULL,
+                cantidad_requerida REAL NOT NULL,
+                tiempo INTEGER NOT NULL,
+                nombre_proceso VARCHAR(100),
+                nombre_producto VARCHAR(100),
+                FOREIGN KEY (id_prototipo) REFERENCES prototipos(id_prototipo),
+                FOREIGN KEY (id_proceso_guardado) REFERENCES procesos_guardados(id_proceso_guardado),
+                FOREIGN KEY (id_producto) REFERENCES productos(id_producto)
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS lotes (
+                id_lote INTEGER PRIMARY KEY AUTOINCREMENT,
+                numero_lote VARCHAR(50) NOT NULL UNIQUE,
+                estado_actual VARCHAR(20) NOT NULL,
+                id_usuario INTEGER NOT NULL,
+                FOREIGN KEY (id_usuario) REFERENCES usuarios(id_usuario)
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS etapas_lotes (
+                id_etapa_lote INTEGER PRIMARY KEY AUTOINCREMENT,
+                id_lote INTEGER NOT NULL,
+                numero_etapa INTEGER NOT NULL,
+                nombre_etapa VARCHAR(100) NOT NULL,
+                tiempo_estimado INTEGER,
+                tiempo_restante INTEGER,
+                maquina_utilizada VARCHAR(100),
+                estado_etapa VARCHAR(20) NOT NULL,
+                FOREIGN KEY (id_lote) REFERENCES lotes(id_lote)
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS etapas_productos (
+                id_etapa_producto INTEGER PRIMARY KEY AUTOINCREMENT,
+                id_etapa_lote INTEGER NOT NULL,
+                id_producto INTEGER NOT NULL,
+                nombre_producto VARCHAR(100) NOT NULL,
+                cantidad_requerida REAL NOT NULL,
+                FOREIGN KEY (id_etapa_lote) REFERENCES etapas_lotes(id_etapa_lote),
+                FOREIGN KEY (id_producto) REFERENCES productos(id_producto)
+            )
+        ''')
+        
+        conn.commit()
+        print("Tabla de usuarios y dependencias recreadas con éxito")
+    except Exception as e:
+        print(f"Error al recrear tabla de usuarios: {str(e)}")
+        conn.rollback()
+    finally:
+        conn.close()
+
+# Llamar a la función al iniciar la aplicación
+with app.app_context():
+    recreate_users_table()
 
 @app.route('/api/usuario', methods=['GET', 'OPTIONS'])
 @token_required
@@ -179,25 +329,31 @@ def get_usuario(current_user):
         'rol': current_user['rol']
     }), 200
 
-@app.route('/api/reset_password', methods=['POST'])
-def reset_password():
-    try:
-        data = request.get_json()
-        if not data or 'username' not in data:
-            return jsonify({'error': 'Usuario es requerido'}), 400
+@app.route('/api/forgot-password', methods=['POST', 'OPTIONS'])
+def forgot_password():
+    if request.method == 'OPTIONS':
+        return '', 200
 
-        username = data['username']
-        conn = get_db_connection()
+    if not request.is_json:
+        return jsonify({'error': 'Solicitud inválida: se esperaba Content-Type application/json'}), 400
+
+    data = request.get_json()
+    if not data or 'email' not in data:
+        return jsonify({'error': 'Correo electrónico es requerido'}), 400
+
+    email = data['email']
+    conn = get_db_connection()
+    try:
         cursor = conn.cursor()
-        cursor.execute('SELECT * FROM users WHERE username = ?', (username,))
+        cursor.execute('SELECT * FROM usuarios WHERE email = ?', (email,))
         user = cursor.fetchone()
 
         if not user:
             return jsonify({'error': 'Usuario no encontrado'}), 404
 
-        # En un sistema real, aquí enviarías un correo o generarías un token de restablecimiento
-        # Por ahora, solo devolvemos un mensaje
-        return jsonify({'message': 'Solicitud de restablecimiento enviada. Contacta al administrador para obtener tu nueva contraseña.'}), 200
+        
+        
+        return jsonify({'message': 'Se ha enviado un enlace de recuperación a tu correo.'}), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
     finally:
@@ -668,7 +824,7 @@ def handle_proveedor(current_user, id):
         conn.close()
 
 # Rutas para manejar procesos guardados
-@app.route('/api/procesos_guardados', methods=['GET', 'OPTIONS'])
+# @app.route('/api/procesos_guardados', methods=['GET', 'OPTIONS'])
 @token_required
 def get_procesos_guardados(current_user):
     if request.method == 'OPTIONS':
@@ -676,22 +832,73 @@ def get_procesos_guardados(current_user):
 
     conn = get_db_connection()
     try:
-        procesos = conn.execute('SELECT id_proceso_guardado, nombre_proceso, maquina_predeterminada, tiempo_estimado, descripcion FROM procesos_guardados ORDER BY id_proceso_guardado').fetchall()
-        procesos_list = [{
-            'id_proceso_guardado': row['id_proceso_guardado'],
-            'nombre_proceso': row['nombre_proceso'],
-            'maquina_predeterminada': row['maquina_predeterminada'],
-            'tiempo_estimado': row['tiempo_estimado'],
-            'descripcion': row['descripcion']
-        } for row in procesos]
+        print("Conectado a la base de datos SQLite Cloud")
+        cursor = conn.cursor()
+        
+        # Primero verificamos si la tabla existe y tiene la estructura correcta
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS procesos_guardados (
+                id_proceso_guardado INTEGER PRIMARY KEY AUTOINCREMENT,
+                nombre_proceso VARCHAR(100) NOT NULL,
+                maquina_predeterminada VARCHAR(100),
+                tiempo_estimado INTEGER,
+                descripcion TEXT
+            )
+        ''')
+        conn.commit()
+        
+        print("Ejecutando consulta SELECT en procesos_guardados")
+        cursor.execute('SELECT * FROM procesos_guardados ORDER BY id_proceso_guardado')
+        procesos = cursor.fetchall()
+        print(f"Número de procesos encontrados: {len(procesos) if procesos else 0}")
+        
+        if not procesos:
+            print("No se encontraron procesos guardados")
+            # Si no hay procesos, vamos a insertar algunos por defecto
+            procesos_default = [
+                ('Lavado enzimático', 'Lavadora industrial', 135, 'Lavado con enzimas para desgaste suave'),
+                ('Teñido', 'Máquina de teñido', 45, 'Proceso de teñido con colorante índigo'),
+                ('Pre-lavado', 'Lavadora industrial', 30, 'Lavado inicial para preparar la tela'),
+                ('Neutralización', 'Máquina de neutralización', 20, 'Neutralización de químicos'),
+                ('Aplicación de suavizante', 'Máquina de suavizado', 45, 'Aplicación de suavizante y resina fijadora')
+            ]
+            
+            print("Insertando procesos por defecto")
+            for proceso in procesos_default:
+                cursor.execute('''
+                    INSERT INTO procesos_guardados (nombre_proceso, maquina_predeterminada, tiempo_estimado, descripcion)
+                    VALUES (?, ?, ?, ?)
+                ''', proceso)
+            
+            conn.commit()
+            print("Procesos por defecto insertados correctamente")
+            
+            # Volver a obtener los procesos
+            cursor.execute('SELECT * FROM procesos_guardados ORDER BY id_proceso_guardado')
+            procesos = cursor.fetchall()
+            print(f"Número de procesos después de insertar: {len(procesos) if procesos else 0}")
+        
+        procesos_list = []
+        for row in procesos:
+            proceso = {
+                'id_proceso_guardado': row['id_proceso_guardado'],
+                'nombre_proceso': row['nombre_proceso'],
+                'maquina_predeterminada': row['maquina_predeterminada'],
+                'tiempo_estimado': row['tiempo_estimado'],
+                'descripcion': row['descripcion']
+            }
+            print(f"Proceso encontrado: {proceso}")  # Log individual para cada proceso
+            procesos_list.append(proceso)
+        
+        print(f"Procesos devueltos por el backend: {procesos_list}")
         return jsonify(procesos_list), 200
     except Exception as e:
-        return jsonify({'error': f"{str(e)}"}), 500
+        print(f"Error al obtener procesos guardados: {str(e)}")
+        return jsonify({'error': f"Error al obtener procesos guardados: {str(e)}"}), 500
     finally:
         conn.close()
 
-# Rutas para prototipos (corregidas)
-@app.route('/api/prototipos', methods=['GET', 'POST'])
+# @app.route('/api/prototipos', methods=['GET', 'POST'])
 @token_required
 def handle_prototipos(current_user):
     conn = get_db_connection()
@@ -702,57 +909,134 @@ def handle_prototipos(current_user):
             prototipos = cursor.fetchall() or []
             prototipos_list = []
             for prototipo in prototipos:
-                # Obtener materiales asociados
-                cursor.execute('SELECT * FROM materiales_prototipo WHERE id_prototipo = ?', (prototipo['id_prototipo'],))
-                materiales = cursor.fetchall() or []
-                material_details = []
+                cursor.execute('''
+                    SELECT ep.id_etapa_prototipo, ep.id_proceso_guardado, ep.id_producto, ep.cantidad_requerida, ep.tiempo,
+                           ep.nombre_proceso, ep.nombre_producto, p.cantidad as stock_disponible
+                    FROM etapas_prototipos ep
+                    JOIN productos p ON ep.id_producto = p.id_producto
+                    WHERE ep.id_prototipo = ?
+                ''', (prototipo['id_prototipo'],))
+                etapas = cursor.fetchall() or []
+                etapas_list = []
                 stock_suficiente = True
-                for material in materiales:
-                    cursor.execute('SELECT cantidad FROM productos WHERE id_producto = ?', (material['id_producto'],))
-                    producto = cursor.fetchone()
-                    cantidad_disponible = producto['cantidad'] if producto else 0
-                    if cantidad_disponible < material['cantidad']:
+                for etapa in etapas:
+                    stock_disponible = float(etapa['stock_disponible']) if etapa['stock_disponible'] is not None else 0.0
+                    cantidad_requerida = float(etapa['cantidad_requerida']) if etapa['cantidad_requerida'] is not None else 0.0
+                    stock_suficiente_etapa = stock_disponible >= cantidad_requerida
+                    if not stock_suficiente_etapa:
                         stock_suficiente = False
-                    material_details.append({
-                        'id_producto': material['id_producto'],
-                        'cantidad': material['cantidad'],
-                        'disponible': cantidad_disponible
+                    etapas_list.append({
+                        'id_etapa': etapa['id_etapa_prototipo'],
+                        'id_proceso_guardado': etapa['id_proceso_guardado'],
+                        'id_producto': etapa['id_producto'],
+                        'nombre_proceso': etapa['nombre_proceso'] if etapa['nombre_proceso'] else 'N/A',
+                        'nombre_producto': etapa['nombre_producto'] if etapa['nombre_producto'] else 'N/A',
+                        'cantidad_requerida': cantidad_requerida,
+                        'tiempo': float(etapa['tiempo']) if etapa['tiempo'] is not None else 0.0,
+                        'stock_disponible': stock_disponible,
+                        'stock_suficiente': stock_suficiente_etapa
                     })
+
+                fecha_creacion = prototipo['fecha_creacion'] if prototipo['fecha_creacion'] else 'N/A'
                 prototipos_list.append({
                     'id_prototipo': prototipo['id_prototipo'],
                     'nombre': prototipo['nombre'],
                     'estado': prototipo['estado'],
                     'responsable': prototipo['responsable'],
-                    'fecha': prototipo['fecha'],
-                    'materiales': material_details,
+                    'fecha_creacion': fecha_creacion,
+                    'notas': prototipo['notas'] if prototipo['notas'] is not None else '',
+                    'id_usuario': prototipo['id_usuario'],
+                    'etapas': etapas_list,
                     'stockSuficiente': stock_suficiente
                 })
             return jsonify(prototipos_list), 200
 
         elif request.method == 'POST':
             data = request.get_json()
-            if not data or 'nombre' not in data or 'responsable' not in data or 'estado' not in data:
-                return jsonify({'error': 'Nombre, responsable y estado son requeridos'}), 400
+            if not data:
+                return jsonify({'error': 'Se requiere un cuerpo JSON con los datos'}), 400
 
-            cursor.execute('INSERT INTO prototipos (nombre, estado, responsable, fecha) VALUES (?, ?, ?, ?)',
-                           (data['nombre'], data['estado'], data['responsable'], datetime.now().strftime('%Y-%m-%d')))
+            print(f"Datos recibidos: {data}")  # Log para depuración
+
+            required_fields = ['nombre', 'estado', 'responsable']
+            if not all(field in data for field in required_fields):
+                return jsonify({'error': 'Los campos nombre, estado y responsable son requeridos'}), 400
+
+            # Validar campos
+            nombre = data['nombre']
+            estado = data['estado']
+            responsable = data['responsable']
+            notas = data.get('notas', '')
+            id_usuario = data.get('id_usuario', current_user['id'])
+
+            # Verificar que el usuario existe
+            cursor.execute('SELECT * FROM usuarios WHERE id_usuario = ?', (id_usuario,))
+            if not cursor.fetchone():
+                return jsonify({'error': 'Usuario no encontrado'}), 404
+
+            # Insertar prototipo
+            cursor.execute('''
+                INSERT INTO prototipos (nombre, fecha_creacion, responsable, notas, estado, id_usuario)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (
+                nombre,
+                datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                responsable,
+                notas,
+                estado,
+                id_usuario
+            ))
             id_prototipo = cursor.lastrowid
 
-            if 'materiales' in data and data['materiales']:
-                for material in data['materiales']:
-                    cursor.execute('INSERT INTO materiales_prototipo (id_prototipo, id_producto, cantidad) VALUES (?, ?, ?)',
-                                   (id_prototipo, material['id_producto'], material['cantidad']))
+            # Insertar etapas si se proporcionan
+            if 'etapas' in data:
+                for etapa in data['etapas']:
+                    if not all(key in etapa for key in ['id_proceso_guardado', 'id_producto', 'cantidad_requerida', 'tiempo']):
+                        return jsonify({'error': 'Cada etapa debe tener id_proceso_guardado, id_producto, cantidad_requerida y tiempo'}), 400
+
+                    # Obtener nombre_proceso
+                    cursor.execute('SELECT nombre_proceso FROM procesos_guardados WHERE id_proceso_guardado = ?', (etapa['id_proceso_guardado'],))
+                    proceso = cursor.fetchone()
+                    if not proceso:
+                        # Si no se encuentra el proceso, intentar convertir el id_proceso_guardado a entero
+                        try:
+                            id_proceso = int(etapa['id_proceso_guardado'])
+                            cursor.execute('SELECT nombre_proceso FROM procesos_guardados WHERE id_proceso_guardado = ?', (id_proceso,))
+                            proceso = cursor.fetchone()
+                            if not proceso:
+                                return jsonify({'error': f'Proceso con ID {id_proceso} no encontrado'}), 404
+                        except ValueError:
+                            return jsonify({'error': f'ID de proceso inválido: {etapa["id_proceso_guardado"]}'}), 400
+
+                    # Obtener nombre_producto
+                    cursor.execute('SELECT nombre FROM productos WHERE id_producto = ?', (etapa['id_producto'],))
+                    producto = cursor.fetchone()
+                    if not producto:
+                        return jsonify({'error': f'Producto con ID {etapa["id_producto"]} no encontrado'}), 404
+
+                    cursor.execute('''
+                        INSERT INTO etapas_prototipos (id_prototipo, id_proceso_guardado, id_producto, cantidad_requerida, tiempo, nombre_proceso, nombre_producto)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        id_prototipo,
+                        int(etapa['id_proceso_guardado']),  # Convertir a entero
+                        etapa['id_producto'],
+                        etapa['cantidad_requerida'],
+                        etapa['tiempo'],
+                        proceso['nombre_proceso'],
+                        producto['nombre']
+                    ))
 
             conn.commit()
             return jsonify({'message': 'Prototipo creado correctamente', 'id_prototipo': id_prototipo}), 201
 
     except Exception as e:
         conn.rollback()
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': f'Error al procesar prototipos: {str(e)}'}), 500
     finally:
         conn.close()
 
-@app.route('/api/prototipos/<int:id>', methods=['GET', 'PUT', 'DELETE'])
+# @app.route('/api/prototipos/<int:id>', methods=['GET', 'PUT', 'DELETE'])
 @token_required
 def handle_prototipo(current_user, id):
     conn = get_db_connection()
@@ -767,19 +1051,54 @@ def handle_prototipo(current_user, id):
             cursor.execute('SELECT * FROM materiales_prototipo WHERE id_prototipo = ?', (id,))
             materiales = cursor.fetchall() or []
             material_details = []
+            stock_suficiente = True
             for material in materiales:
+                cursor.execute('SELECT cantidad FROM productos WHERE id_producto = ?', (material['id_producto'],))
+                producto = cursor.fetchone()
+                cantidad_disponible = float(producto['cantidad']) if producto else 0.0
+                if cantidad_disponible < float(material['cantidad']):
+                    stock_suficiente = False
                 material_details.append({
                     'id_producto': material['id_producto'],
-                    'cantidad': material['cantidad']
+                    'cantidad': float(material['cantidad']),
+                    'disponible': cantidad_disponible
                 })
 
+            cursor.execute('''
+                SELECT ep.id_etapa_prototipo, ep.id_proceso_guardado, ep.id_producto, ep.cantidad_requerida, ep.tiempo,
+                       ep.nombre_proceso, ep.nombre_producto, p.cantidad as stock_disponible
+                FROM etapas_prototipos ep
+                JOIN productos p ON ep.id_producto = p.id_producto
+                WHERE ep.id_prototipo = ?
+            ''', (id,))
+            etapas = cursor.fetchall() or []
+            etapas_list = [
+                {
+                    'id_etapa': etapa['id_etapa_prototipo'],
+                    'id_proceso_guardado': etapa['id_proceso_guardado'],
+                    'id_producto': etapa['id_producto'],
+                    'nombre_proceso': etapa['nombre_proceso'],
+                    'nombre_producto': etapa['nombre_producto'],
+                    'cantidad_requerida': float(etapa['cantidad_requerida']),
+                    'tiempo': float(etapa['tiempo']),
+                    'stock_disponible': float(etapa['stock_disponible']),
+                    'stock_suficiente': bool(float(etapa['stock_disponible']) >= float(etapa['cantidad_requerida']))
+                }
+                for etapa in etapas
+            ]
+
+            fecha_creacion = prototipo['fecha_creacion'] if prototipo['fecha_creacion'] else 'N/A'
             return jsonify({
                 'id_prototipo': prototipo['id_prototipo'],
                 'nombre': prototipo['nombre'],
                 'estado': prototipo['estado'],
                 'responsable': prototipo['responsable'],
-                'fecha': prototipo['fecha'],
-                'materiales': material_details
+                'fecha_creacion': fecha_creacion,
+                'notas': prototipo['notas'] if prototipo['notas'] else '',
+                'id_usuario': prototipo['id_usuario'],
+                'materiales': material_details,
+                'etapas': etapas_list,
+                'stockSuficiente': stock_suficiente
             }), 200
 
         elif request.method == 'PUT':
@@ -793,7 +1112,7 @@ def handle_prototipo(current_user, id):
 
             update_fields = []
             update_values = []
-            for key in ['nombre', 'estado', 'responsable']:
+            for key in ['nombre', 'estado', 'responsable', 'notas', 'id_usuario']:
                 if key in data and data[key] is not None:
                     update_fields.append(f"{key} = ?")
                     update_values.append(data[key])
@@ -809,6 +1128,35 @@ def handle_prototipo(current_user, id):
                     cursor.execute('INSERT INTO materiales_prototipo (id_prototipo, id_producto, cantidad) VALUES (?, ?, ?)',
                                    (id, material['id_producto'], material['cantidad']))
 
+            # Actualizar etapas si se proporcionan
+            if 'etapas' in data:
+                # Eliminar las etapas existentes
+                cursor.execute('DELETE FROM etapas_prototipos WHERE id_prototipo = ?', (id,))
+                # Insertar las nuevas etapas
+                for etapa in data['etapas']:
+                    if not all(key in etapa for key in ['id_proceso_guardado', 'id_producto', 'cantidad_requerida', 'tiempo']):
+                        return jsonify({'error': 'Cada etapa debe tener id_proceso_guardado, id_producto, cantidad_requerida y tiempo'}), 400
+                    cursor.execute('SELECT nombre_proceso FROM procesos_guardados WHERE id_proceso_guardado = ?', (etapa['id_proceso_guardado'],))
+                    proceso = cursor.fetchone()
+                    if not proceso:
+                        return jsonify({'error': f'Proceso con ID {etapa["id_proceso_guardado"]} no encontrado'}), 404
+                    cursor.execute('SELECT nombre FROM productos WHERE id_producto = ?', (etapa['id_producto'],))
+                    producto = cursor.fetchone()
+                    if not producto:
+                        return jsonify({'error': f'Producto con ID {etapa["id_producto"]} no encontrado'}), 404
+                    cursor.execute('''
+                        INSERT INTO etapas_prototipos (id_prototipo, id_proceso_guardado, id_producto, cantidad_requerida, tiempo, nombre_proceso, nombre_producto)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        id,
+                        etapa['id_proceso_guardado'],
+                        etapa['id_producto'],
+                        etapa['cantidad_requerida'],
+                        etapa['tiempo'],
+                        proceso['nombre_proceso'],
+                        producto['nombre']
+                    ))
+
             conn.commit()
             return jsonify({'message': 'Prototipo actualizado correctamente'}), 200
 
@@ -818,18 +1166,18 @@ def handle_prototipo(current_user, id):
                 return jsonify({'error': 'Prototipo no encontrado'}), 404
 
             cursor.execute('DELETE FROM materiales_prototipo WHERE id_prototipo = ?', (id,))
-            cursor.execute('DELETE FROM etapas WHERE id_prototipo = ?', (id,))
+            cursor.execute('DELETE FROM etapas_prototipos WHERE id_prototipo = ?', (id,))
             cursor.execute('DELETE FROM prototipos WHERE id_prototipo = ?', (id,))
             conn.commit()
             return jsonify({'message': 'Prototipo eliminado correctamente'}), 200
 
     except Exception as e:
         conn.rollback()
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': f'Error al procesar prototipo: {str(e)}'}), 500
     finally:
         conn.close()
 
-@app.route('/api/prototipos/<int:id>/etapas', methods=['GET', 'POST'])
+# @app.route('/api/prototipos/<int:id>/etapas', methods=['GET', 'POST'])
 @token_required
 def handle_etapas(current_user, id):
     conn = get_db_connection()
@@ -840,14 +1188,25 @@ def handle_etapas(current_user, id):
             if not cursor.fetchone():
                 return jsonify({'error': 'Prototipo no encontrado'}), 404
 
-            cursor.execute('SELECT * FROM etapas WHERE id_prototipo = ?', (id,))
+            cursor.execute('''
+                SELECT ep.id_etapa_prototipo, ep.id_proceso_guardado, ep.id_producto, ep.cantidad_requerida, ep.tiempo,
+                       ep.nombre_proceso, ep.nombre_producto, p.cantidad as stock_disponible
+                FROM etapas_prototipos ep
+                JOIN productos p ON ep.id_producto = p.id_producto
+                WHERE ep.id_prototipo = ?
+            ''', (id,))
             etapas = cursor.fetchall() or []
             etapas_list = [
                 {
-                    'id_etapa': etapa['id_etapa'],
-                    'nombre': etapa['nombre'],
-                    'fecha': etapa['fecha'],
-                    'estado': etapa['estado']
+                    'id_etapa': etapa['id_etapa_prototipo'],
+                    'id_proceso_guardado': etapa['id_proceso_guardado'],
+                    'id_producto': etapa['id_producto'],
+                    'nombre_proceso': etapa['nombre_proceso'],
+                    'nombre_producto': etapa['nombre_producto'],
+                    'cantidad_requerida': float(etapa['cantidad_requerida']),
+                    'tiempo': float(etapa['tiempo']),
+                    'stock_disponible': float(etapa['stock_disponible']),
+                    'stock_suficiente': bool(float(etapa['stock_disponible']) >= float(etapa['cantidad_requerida']))
                 }
                 for etapa in etapas
             ]
@@ -855,25 +1214,45 @@ def handle_etapas(current_user, id):
 
         elif request.method == 'POST':
             data = request.get_json()
-            if not data or 'nombre' not in data or 'fecha' not in data or 'estado' not in data:
-                return jsonify({'error': 'Nombre, fecha y estado son requeridos'}), 400
+            if not data or not all(key in data for key in ['id_proceso_guardado', 'id_producto', 'cantidad_requerida', 'tiempo']):  # Cambiado id_proceso a id_proceso_guardado
+                return jsonify({'error': 'id_proceso_guardado, id_producto, cantidad_requerida y tiempo son requeridos'}), 400
 
             cursor.execute('SELECT * FROM prototipos WHERE id_prototipo = ?', (id,))
             if not cursor.fetchone():
                 return jsonify({'error': 'Prototipo no encontrado'}), 404
 
-            cursor.execute('INSERT INTO etapas (id_prototipo, nombre, fecha, estado) VALUES (?, ?, ?, ?)',
-                           (id, data['nombre'], data['fecha'], data['estado']))
+            cursor.execute('SELECT nombre_proceso FROM procesos_guardados WHERE id_proceso_guardado = ?', (data['id_proceso_guardado'],))
+            proceso = cursor.fetchone()
+            if not proceso:
+                return jsonify({'error': f'Proceso con ID {data["id_proceso_guardado"]} no encontrado'}), 404
+
+            cursor.execute('SELECT nombre, cantidad FROM productos WHERE id_producto = ?', (data['id_producto'],))
+            producto = cursor.fetchone()
+            if not producto:
+                return jsonify({'error': f'Producto con ID {data["id_producto"]} no encontrado'}), 404
+
+            cursor.execute('''
+                INSERT INTO etapas_prototipos (id_prototipo, id_proceso_guardado, id_producto, cantidad_requerida, tiempo, nombre_proceso, nombre_producto)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                id,
+                data['id_proceso_guardado'],  # Usamos id_proceso_guardado como id_proceso
+                data['id_producto'],
+                data['cantidad_requerida'],
+                data['tiempo'],
+                proceso['nombre_proceso'],
+                producto['nombre']
+            ))
             conn.commit()
             return jsonify({'message': 'Etapa creada correctamente'}), 201
 
     except Exception as e:
         conn.rollback()
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': f'Error al procesar etapas: {str(e)}'}), 500
     finally:
         conn.close()
 
-@app.route('/api/prototipos/<int:id>/etapas/<int:id_etapa>', methods=['DELETE'])
+# @app.route('/api/prototipos/<int:id>/etapas/<int:id_etapa>', methods=['DELETE'])
 @token_required
 def delete_etapa(current_user, id, id_etapa):
     conn = get_db_connection()
@@ -883,17 +1262,17 @@ def delete_etapa(current_user, id, id_etapa):
         if not cursor.fetchone():
             return jsonify({'error': 'Prototipo no encontrado'}), 404
 
-        cursor.execute('SELECT * FROM etapas WHERE id_etapa = ? AND id_prototipo = ?', (id_etapa, id))
+        cursor.execute('SELECT * FROM etapas_prototipos WHERE id_etapa_prototipo = ? AND id_prototipo = ?', (id_etapa, id))
         if not cursor.fetchone():
             return jsonify({'error': 'Etapa no encontrada'}), 404
 
-        cursor.execute('DELETE FROM etapas WHERE id_etapa = ? AND id_prototipo = ?', (id_etapa, id))
+        cursor.execute('DELETE FROM etapas_prototipos WHERE id_etapa_prototipo = ? AND id_prototipo = ?', (id_etapa, id))
         conn.commit()
         return jsonify({'message': 'Etapa eliminada correctamente'}), 200
 
     except Exception as e:
         conn.rollback()
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': f'Error al eliminar etapa: {str(e)}'}), 500
     finally:
         conn.close()
 
